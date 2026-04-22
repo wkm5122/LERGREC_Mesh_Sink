@@ -1,0 +1,28 @@
+[Unit]
+Description=LERGREC Sink Data Handler
+# Start after the OS has finished booting and networking is up.
+# serial-getty ensures USB devices have had time to enumerate.
+After=network.target
+
+[Service]
+Type=simple
+User=sensor_user
+
+# Change this path if you install the app in a different directory.
+WorkingDirectory=/home/sensor_user/Sink_Data_Handler-main
+
+# Use the full path to python3 to be safe in a systemd environment.
+ExecStart=/usr/bin/python3 /home/sensor_user/Sink_Data_Handler-main/sink_handler.py
+
+# Restart automatically if the process crashes.
+Restart=always
+RestartSec=5
+
+# Write stdout/stderr to the systemd journal.
+# View with: sudo journalctl -u sink_handler -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# Start this service when the system reaches the normal multi-user state.
+WantedBy=multi-user.target
