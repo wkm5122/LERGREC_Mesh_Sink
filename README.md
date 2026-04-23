@@ -63,3 +63,16 @@ The application expects incoming serial data from the Sink device to be formatte
 {"name":"top_sensor","addr":4352,"value":25}
 ```
 When this format is detected on the serial line, it extracts the data and inserts it into the `sensor_data` SQL table along with a timestamp.
+
+## Access & Dashboard Formatting
+
+**Public Dashboard:** The base URL provides a read-only view of the latest temperature readings (converted to Fahrenheit) and a button to download the structured CSV.
+
+**Admin Portal:**
+To access mesh control commands, live serial logs, and database management tools, click **Admin Access**.
+* **Username:** `meshadmin`
+* **Password:** `SquashyGrapes2026`
+
+**Data Handling:** * **Precision:** The Python backend parses incoming Celsius values as floats, converts them to Fahrenheit, and stores them in SQLite. 
+* **CSV Export:** The `/api/export_csv` route pivots the database. It groups readings by the minute received, outputting a single row per time window with discrete columns for `Top_Temp (°F)` and `Bottom_Temp (°F)`.
+* **Clearing Test Data:** Use the "Clear Database Data" button in the Admin panel to truncate the SQLite table before a live deployment.

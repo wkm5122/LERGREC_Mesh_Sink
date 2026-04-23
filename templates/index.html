@@ -1,163 +1,46 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sink Data Handler</title>
-    <!-- Modern Typography from Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-
-<div class="dashboard">
-    <header class="glass-panel">
-        <h1>🍇 SinkHandler <span class="tagline">Vineyard Edition</span></h1>
-        
-        <div class="connection-bar">
-            <div class="input-group">
-                <label>Port:</label>
-                <select id="portSelect"></select>
-                <button id="refreshPortsBtn" class="btn-icon" title="Refresh Ports">↻</button>
-            </div>
-            <div class="input-group">
-                <label>Baud:</label>
-                <select id="baudSelect">
-                    <option value="9600">9600</option>
-                    <option value="19200">19200</option>
-                    <option value="38400">38400</option>
-                    <option value="57600">57600</option>
-                    <option value="115200" selected>115200</option>
-                </select>
-            </div>
-            <button id="connectBtn" class="btn-primary">Connect</button>
-        </div>
-    </header>
-
-    <div class="grid-layout">
-        
-        <!-- Controls Panel -->
-        <section class="panel glass-panel">
-            <h2>Controls & Config</h2>
-            
-            <div class="status-indicator">
-                <div class="dot" id="statusDot"></div>
-                <span id="statusText">Status: Ready</span>
-            </div>
-
-            <div class="form-grid">
-                <div class="input-group">
-                    <label>Suspend Duration (s)</label>
-                    <div class="flex-row">
-                        <input type="number" id="suspendDur" value="60">
-                        <button class="btn-secondary" onclick="updateConfig()">Set</button>
+<div class="card config-card">
+                    <h2>Controls & Config</h2>
+                    
+                    <div class="config-group">
+                        <label>Suspend Duration (s)</label>
+                        <div class="input-row">
+                            <input type="number" id="suspend-duration" value="60">
+                            <button id="btn-set-suspend">Set</button>
+                        </div>
                     </div>
-                </div>
 
-                <div class="input-group">
-                    <label>Publish TX Power (dBm)</label>
-                    <div class="flex-row">
-                        <select id="txPower">
-                            <option value="8">8</option>
-                            <option value="4">4</option>
-                            <option value="0" selected>0</option>
-                            <option value="-3">-3</option>
-                            <option value="-4">-4</option>
-                            <option value="-8">-8</option>
-                            <option value="-12">-12</option>
-                            <option value="-16">-16</option>
-                            <option value="-18">-18</option>
-                            <option value="-20">-20</option>
-                            <option value="-28">-28</option>
-                            <option value="-40">-40</option>
-                        </select>
-                        <button class="btn-secondary" onclick="setTxPower()">Set</button>
+                    <div class="config-group">
+                        <label>Publish TX Power (dBm)</label>
+                        <div class="input-row">
+                            <select id="tx-power">
+                                <option value="0">0</option>
+                                <option value="-4">-4</option>
+                                <option value="-8">-8</option>
+                                <option value="-20">-20</option>
+                            </select>
+                            <button id="btn-set-tx">Set</button>
+                        </div>
                     </div>
-                </div>
 
-                <div class="input-group">
-                    <label>Wake Duration (s)</label>
-                    <input type="number" id="wakeDur" value="30" onchange="updateConfig()">
-                </div>
-                
-                <div class="input-group">
-                    <label>Firmware ON Delay (s)</label>
-                    <input type="number" id="onDelay" value="20" onchange="updateConfig()">
-                </div>
-            </div>
+                    <div class="config-group">
+                        <label>Wake Duration (s)</label>
+                        <input type="number" id="wake-duration" value="30">
+                    </div>
 
-            <div class="actions">
-                <button class="btn-warning w-full" onclick="suspendNow()">Suspend Mesh Now</button>
-                <div class="toggle-container">
-                    <label class="switch">
-                      <input type="checkbox" id="autoCycleToggle" onchange="updateConfig()">
-                      <span class="slider"></span>
-                    </label>
-                    <span>Enable Auto Cycle</span>
-                </div>
-            </div>
-        </section>
+                    <div class="config-group">
+                        <label>Firmware ON Delay (s)</label>
+                        <input type="number" id="firmware-delay" value="20">
+                    </div>
 
-        <!-- Log Panel -->
-        <section class="panel glass-panel log-panel">
-            <div class="panel-header">
-                <h2>System Log</h2>
-                <div class="actions-small">
-                    <label class="checkbox-label"><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
-                    <button class="btn-tertiary" onclick="clearLogs()">Clear</button>
-                </div>
-            </div>
-            <div id="logArea" class="log-area">
-                <!-- Log entries inserted here -->
-            </div>
-        </section>
-
-        <!-- Data Query Panel (Full Width) -->
-        <section class="panel glass-panel data-panel">
-            <div class="panel-header">
-                <h2>Data Explorer</h2>
-                <div class="data-tools">
-                    <input type="text" id="searchAddr" placeholder="Filter by Address..." style="width: 140px;">
-                    <button class="btn-secondary" onclick="fetchData()">Search</button>
-                    <button class="btn-tertiary" onclick="fetchData(true)">Show All</button>
-                    <div class="divider"></div>
+                    <button id="btn-suspend-now" class="full-width warning-btn">Suspend Mesh Now</button>
                     
-                    <input type="number" id="pruneTime" value="4" style="width: 60px;">
-                    <button class="btn-secondary" onclick="pruneData()">Prune (s)</button>
-                    
-                    <div class="divider"></div>
-                    <button class="btn-tertiary" onclick="document.getElementById('cdbUpload').click()">Load CDB JSON</button>
-                    <input type="file" id="cdbUpload" style="display: none;" accept=".json" onchange="uploadCDB(this)">
-                    
-                    <div class="divider"></div>
-                    <button class="btn-danger" onclick="clearData()">Clear Data</button>
-                    <a href="/api/data/export" class="btn-primary" download>Export CSV</a>
+                    <div class="toggle-group" style="margin-top: 15px; margin-bottom: 15px;">
+                        <label class="switch">
+                            <input type="checkbox" id="toggle-auto-cycle">
+                            <span class="slider round"></span>
+                        </label>
+                        <span>Enable Auto Cycle</span>
+                    </div>
+
+                    <button id="btn-clear-db" class="full-width action-btn" style="background: #e74c3c; border: 1px solid #c0392b;">Clear Database Data</button>
                 </div>
-            </div>
-            
-            <div class="table-container">
-                <table id="dataTable">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Timestamp</th>
-                            <th>Name</th>
-                            <th>Address</th>
-                            <th>Location</th>
-                            <th>UUID</th>
-                            <th>Value</th>
-                        </tr>
-                    </thead>
-                    <tbody id="dataTableBody">
-                        <!-- Data inserted here -->
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-    </div>
-</div>
-
-<script src="/static/js/app.js"></script>
-</body>
-</html>

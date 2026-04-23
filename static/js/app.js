@@ -1,214 +1,169 @@
-// DOM Elements
-const portSelect = document.getElementById('portSelect');
-const baudSelect = document.getElementById('baudSelect');
-const connectBtn = document.getElementById('connectBtn');
-const refreshPortsBtn = document.getElementById('refreshPortsBtn');
-
-const suspendDur = document.getElementById('suspendDur');
-const wakeDur = document.getElementById('wakeDur');
-const onDelay = document.getElementById('onDelay');
-const txPower = document.getElementById('txPower');
-const autoCycleToggle = document.getElementById('autoCycleToggle');
-
-const statusDot = document.getElementById('statusDot');
-const statusText = document.getElementById('statusText');
-
-const logArea = document.getElementById('logArea');
-const autoScroll = document.getElementById('autoScroll');
-
-const searchAddr = document.getElementById('searchAddr');
-const pruneTime = document.getElementById('pruneTime');
-const dataTableBody = document.getElementById('dataTableBody');
-
-let lastLogIndex = 0;
-let isConnectedState = false;
-
-// Initialization
-async function init() {
-    await fetchPorts();
-    await fetchStatus();
-    fetchData(true);
+document.addEventListener('DOMContentLoaded', () => {
+    // --- DOM Elements: Admin Auth ---
+    const btnShowLogin = document.getElementById('btn-show-login');
+    const loginModal = document.getElementById('login-modal');
+    const btnCloseModal = document.getElementById('btn-close-modal');
+    const btnSubmitLogin = document.getElementById('btn-submit-login');
+    const adminUsername = document.getElementById('admin-username');
+    const adminPassword = document.getElementById('admin-password');
+    const loginError = document.getElementById('login-error');
     
-    // Start Pollers
-    setInterval(fetchStatus, 2000);
-    setInterval(fetchLogs, 1000);
-}
+    const publicView = document.getElementById('public-view');
+    const adminView = document.getElementById('admin-view');
+    const btnLogout = document.getElementById('btn-logout');
 
-// API Functions
-async function fetchPorts() {
-    const res = await fetch('/api/ports');
-    const ports = await res.json();
-    portSelect.innerHTML = ports.map(p => `<option value="${p}">${p}</option>`).join('');
-    if (ports.length === 0) portSelect.innerHTML = `<option value="">No ports found</option>`;
-}
+    // --- DOM Elements: Controls & Data ---
+    const btnSetSuspend = document.getElementById('btn-set-suspend');
+    const btnSetTx = document.getElementById('btn-set-tx');
+    const btnSuspendNow = document.getElementById('btn-suspend-now');
+    const toggleAutoCycle = document.getElementById('toggle-auto-cycle');
+    const btnClearLog = document.getElementById('btn-clear-log');
+    const btnDownloadCsv = document.getElementById('btn-download-csv');
+    const btnClearDb = document.getElementById('btn-clear-db'); // New DB Wipe Button
 
-async function fetchStatus() {
-    try {
-        const res = await fetch('/api/status');
-        const status = await res.json();
-        
-        isConnectedState = status.is_connected;
-        if (isConnectedState) {
-            connectBtn.textContent = 'Disconnect';
-            connectBtn.classList.add('btn-danger');
-            connectBtn.classList.remove('btn-primary');
-            if(status.port && portSelect.value !== status.port) portSelect.value = status.port;
+    const inputSuspend = document.getElementById('suspend-duration');
+    const inputTx = document.getElementById('tx-power');
+    const inputWake = document.getElementById('wake-duration');
+    const inputDelay = document.getElementById('firmware-delay');
+
+    const cycleStatusDot = document.getElementById('cycle-status-dot');
+    const cycleStatusText = document.getElementById('cycle-status-text');
+    const latestDataContainer = document.getElementById('latest-data');
+    const logWindow = document.getElementById('log-window');
+
+    // --- Admin Authentication Logic ---
+    btnShowLogin.addEventListener('click', () => {
+        loginModal.classList.remove('hidden');
+        adminUsername.focus();
+    });
+
+    btnCloseModal.addEventListener('click', () => {
+        loginModal.classList.add('hidden');
+        loginError.classList.add('hidden');
+    });
+
+    btnSubmitLogin.addEventListener('click', () => {
+        const user = adminUsername.value;
+        const pass = adminPassword.value;
+
+        if (user === 'meshadmin' && pass === 'SquashyGrapes2026') {
+            loginModal.classList.add('hidden');
+            adminView.classList.remove('hidden');
+            btnShowLogin.classList.add('hidden');
+            adminUsername.value = '';
+            adminPassword.value = '';
+            loginError.classList.add('hidden');
         } else {
-            connectBtn.textContent = 'Connect';
-            connectBtn.classList.add('btn-primary');
-            connectBtn.classList.remove('btn-danger');
+            loginError.classList.remove('hidden');
+            adminPassword.value = '';
         }
+    });
 
-        // Update dot
-        statusDot.className = 'dot ' + (status.status_color || 'blue');
-        statusText.textContent = status.status_text || 'Ready';
+    btnLogout.addEventListener('click', () => {
+        adminView.classList.add('hidden');
+        btnShowLogin.classList.remove('hidden');
+    });
 
-        // Set inputs if we haven't touched them
-        if (document.activeElement !== suspendDur) suspendDur.value = status.suspend_dur;
-        if (document.activeElement !== wakeDur) wakeDur.value = status.wake_dur;
-        if (document.activeElement !== onDelay) onDelay.value = status.on_delay;
-        
-        autoCycleToggle.checked = status.auto_cycle;
+    adminPassword.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') btnSubmitLogin.click();
+    });
 
-    } catch(e) {
-        console.error("Status fetch failed", e);
+    // --- Mesh Logic & Controls ---
+    btnDownloadCsv.addEventListener('click', () => {
+        window.location.href = '/api/export_csv';
+    });
+
+    fetch('/api/config')
+        .then(res => res.json())
+        .then(data => {
+            inputSuspend.value = data.suspend_duration;
+            inputWake.value = data.wake_duration;
+            inputDelay.value = data.firmware_delay;
+            inputTx.value = data.tx_power;
+            toggleAutoCycle.checked = data.auto_cycle;
+        });
+
+    function sendConfig(payload) {
+        fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(res => res.json())
+          .then(data => console.log('Config updated:', data))
+          .catch(err => console.error('Error updating config:', err));
     }
-}
 
-async function fetchLogs() {
-    try {
-        const res = await fetch(`/api/logs?since=${lastLogIndex}`);
-        const data = await res.json();
-        
-        if (data.logs.length > 0) {
-            data.logs.forEach(log => {
-                // simple split on ' - ' to style timestamp
-                let parts = log.split(' - ');
-                let html = `<div><span class="ts">${parts[0]}</span> - ${parts.slice(1).join(' - ')}</div>`;
-                logArea.innerHTML += html;
+    btnSetSuspend.addEventListener('click', () => sendConfig({ suspend_duration: parseInt(inputSuspend.value) }));
+    btnSetTx.addEventListener('click', () => sendConfig({ tx_power: parseInt(inputTx.value) }));
+    inputWake.addEventListener('change', () => sendConfig({ wake_duration: parseInt(inputWake.value) }));
+    inputDelay.addEventListener('change', () => sendConfig({ firmware_delay: parseInt(inputDelay.value) }));
+    toggleAutoCycle.addEventListener('change', (e) => sendConfig({ auto_cycle: e.target.checked }));
+
+    btnSuspendNow.addEventListener('click', () => {
+        fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cmd: "mesh_app set_onoff_temp" }) 
+        }).then(res => res.json())
+          .then(data => alert('Suspend command sent to gateway.'));
+    });
+
+    btnClearLog.addEventListener('click', () => logWindow.innerHTML = '');
+
+    // Database Wipe Logic
+    btnClearDb.addEventListener('click', () => {
+        if(confirm("WARNING: This will permanently delete all sensor data from the database. The CSV will be empty. Proceed?")) {
+            fetch('/api/admin/clear', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => alert(data.message));
+        }
+    });
+
+    // --- Polling Data, Status, and Logs ---
+    setInterval(() => {
+        fetch('/api/status')
+            .then(res => res.json())
+            .then(data => {
+                if(data.cycle_state === "Suspend") {
+                    cycleStatusDot.className = "dot red";
+                    cycleStatusText.innerText = "Suspended";
+                } else if(data.cycle_state === "Wake") {
+                    cycleStatusDot.className = "dot green";
+                    cycleStatusText.innerText = "Wake Phase (Listening)";
+                } else {
+                    cycleStatusDot.className = "dot blue";
+                    cycleStatusText.innerText = "Ready (Manual Mode)";
+                }
             });
-            lastLogIndex = data.next_index;
-            if (autoScroll.checked) logArea.scrollTop = logArea.scrollHeight;
+
+        fetch('/api/data/latest')
+            .then(res => res.json())
+            .then(data => {
+                latestDataContainer.innerHTML = '';
+                if(data.length === 0) {
+                    latestDataContainer.innerHTML = '<p style="color:#aaa;">No data received yet.</p>';
+                } else {
+                    data.forEach(node => {
+                        const div = document.createElement('div');
+                        div.className = 'node-card';
+                        // Ensure formatting to 1 decimal place with °F
+                        div.innerHTML = `
+                            <h3>${node.name} <span style="font-size:12px;color:#888;">(0x${node.addr.toString(16)})</span></h3>
+                            <div class="val">${parseFloat(node.value).toFixed(1)}°F</div>
+                            <div class="time">${node.timestamp}</div>
+                        `;
+                        latestDataContainer.appendChild(div);
+                    });
+                }
+            });
+
+        if (!adminView.classList.contains('hidden')) {
+            fetch('/api/logs')
+                .then(res => res.json())
+                .then(data => {
+                    logWindow.innerHTML = data.logs.join('<br>');
+                    logWindow.scrollTop = logWindow.scrollHeight;
+                });
         }
-    } catch(e) {}
-}
-
-async function fetchData(showAll = false) {
-    if (showAll) searchAddr.value = '';
-    const addr = searchAddr.value.trim();
-    let url = '/api/data';
-    if (addr && !showAll) url += `?addr=${encodeURIComponent(addr)}`;
-
-    try {
-        const res = await fetch(url);
-        const data = await res.json();
-        renderTable(data);
-    } catch(e) {}
-}
-
-// Actions
-refreshPortsBtn.addEventListener('click', fetchPorts);
-
-connectBtn.addEventListener('click', async () => {
-    const port = portSelect.value;
-    const baud = baudSelect.value;
-    if (!isConnectedState && !port) { alert("Please select a port"); return; }
-    
-    await fetch('/api/connect', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ port, baud })
-    });
-    fetchStatus();
+    }, 2000);
 });
-
-async function updateConfig() {
-    const payload = {
-        suspend_dur: parseInt(suspendDur.value),
-        wake_dur: parseInt(wakeDur.value),
-        on_delay: parseInt(onDelay.value),
-        auto_cycle: autoCycleToggle.checked
-    };
-    await fetch('/api/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    });
-}
-
-async function setTxPower() {
-    await fetch('/api/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ tx_power: txPower.value })
-    });
-}
-
-function suspendNow() {
-    fetch('/api/command', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ suspend_now: true })
-    });
-}
-
-function clearLogs() {
-    fetch('/api/logs/clear', { method: 'POST' }).then(() => {
-        logArea.innerHTML = '';
-        lastLogIndex = 0;
-    });
-}
-
-function pruneData() {
-    const pTime = pruneTime.value;
-    fetch('/api/data/prune', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ prune_time: parseFloat(pTime) })
-    }).then(() => fetchData());
-}
-
-function clearData() {
-    if(confirm("Are you sure you want to delete all database entries?")) {
-        fetch('/api/data/clear', { method: 'POST' }).then(() => fetchData());
-    }
-}
-
-function uploadCDB(input) {
-    if (!input.files || input.files.length === 0) return;
-    const formData = new FormData();
-    formData.append("file", input.files[0]);
-    
-    fetch('/api/cdb', {
-        method: 'POST',
-        body: formData
-    }).then(res => res.json()).then(data => {
-        if(data.success) {
-            alert(data.msg);
-            fetchData();
-        } else {
-            alert("Error: " + data.msg);
-        }
-    });
-    input.value = ''; // reset
-}
-
-function renderTable(data) {
-    dataTableBody.innerHTML = data.map(r => `
-        <tr>
-            <td>${r.id}</td>
-            <td>${r.timestamp.substring(0, 19).replace('T', ' ')}</td>
-            <td>${r.name}</td>
-            <td>${r.addr}</td>
-            <td>${r.location}</td>
-            <td>${r.uuid}</td>
-            <td>${r.value}</td>
-        </tr>
-    `).join('');
-    if(data.length === 0) {
-        dataTableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: #888;">No data records found.</td></tr>`;
-    }
-}
-
-// Run
-window.addEventListener('load', init);
