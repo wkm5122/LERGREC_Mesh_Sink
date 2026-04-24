@@ -1,8 +1,8 @@
 # Sink Data Handler (Web Server Edition)
 
-The Sink Data Handler (`sink_handler.py`) is a Python application that interfaces with a BLE Mesh Sink Device over a serial connection. It logs incoming sensor data to a local SQLite database (`sensor_data.db`) and allows the user to configure the mesh network's power-saving cycle. 
+The Sink Data Handler (`sink_handler.py`) is a Python application that interfaces with a BLE Mesh Sink Device over a serial connection. It logs incoming sensor data to a local SQLite database (`sensor_data.db`) and allows administrators to configure the mesh network's power-saving cycle.
 
-It has been upgraded to run entirely headlessly as a **Flask Web Server**. This makes it perfect to run in the background (console/SSH) on a Raspberry Pi, while you access the beautiful Vineyard-themed Graphical User Interface from any web browser on your network.
+It runs entirely headlessly as a **Flask Web Server**, designed to run in the background on a Raspberry Pi while you access the Vineyard-themed interface from any browser on the network.
 
 ## Prerequisites
 
@@ -10,69 +10,108 @@ It has been upgraded to run entirely headlessly as a **Flask Web Server**. This 
 - `pyserial` (for serial communication)
 - `flask` (for the web server)
 
-You can install the required packages using pip:
 ```bash
 pip install pyserial flask
 ```
 
 ## Running the Application
 
-To start the continuous web server, navigate to the directory containing the file and run:
 ```bash
 python sink_handler.py
 ```
 
-The console will indicate that the Flask server is running (usually on `http://0.0.0.0:5000/`).
-
-## Accessing the Interface
-
-Open a web browser on any device in the same network and navigate to:
+The server starts on `http://0.0.0.0:5000/`. Access it from any device on the same network:
 `http://<IP_ADDRESS_OF_PI>:5000`
-(If running locally, you can use `http://localhost:5000`)
 
-## Features and Usage
+---
 
-### 1. Connection
-The **Connection** bar at the top allows you to connect to the Sink Device.
-- **Port**: Select the COM port from the dropdown menu (e.g. `/dev/ttyACM0` on Pi). Click the **Refresh ↻** arrow to update the list.
-- **Baud**: Set the baud rate (default is 115200).
-- **Connect / Disconnect**: Click to establish or terminate the connection.
+## Interface Overview
 
-### 2. Controls & Config
-This panel manages the BLE Mesh sleep behavior and auto-cycling.
-- **Suspend/Wake Duration**: The duration the mesh should remain asleep or awake. 
-- **Firmware ON Delay**: Matches the compiled ON delay in the firmware (time the device remains on after a suspend transition before actually sleeping, default 20s).
-- **Publish TX Power**: Sets the signal strength (`-40 dBm` to `+8 dBm`).
-- **Suspend Mesh Now**: Immediately triggers the mesh to begin its suspend sequence.
-- **Enable Auto Cycle**: Toggle switch to have the application automatically cycle the Sink device between Wake and Suspend phases.
+### Home Page (Public)
 
-### 3. Data Explorer
-View and manage the sensor data stored in the local SQLite database (`sensor_data.db`).
-- **Filter by Address**: Enter a specific node address to isolate data.
-- **Prune (s)**: Removes repetitive readings that occurred within the specified timeframe for the same sensor.
-- **Load CDB JSON**: Upload an nRF Mesh CDB (`.json`) configuration file to map your device Elements to their expected sub-addresses.
-- **Export CSV**: Downloads all currently displayed data to your PC as a `.csv` file.
-- **Clear Data**: Deletes all sensor data from the database.
+The home page is accessible to anyone on the network and shows:
 
-### 4. System Log
-A real-time console showing serial feedback, database inserts, and auto-cycle transitions.
+- **System Status** — Live connection status (connected port, auto-cycle phase, color-coded indicator).
+- **Latest Node Readings** — Cards showing the most recent Top and Bottom temperature readings (°F) for each node, with timestamps.
+- **Download CSV** — Exports all collected data as a formatted CSV file (see CSV format below).
+- **Admin Button** — Opens the admin panel (password protected).
+
+### Admin Panel
+
+Click the **⚙ Admin** button in the top-right corner. You will be prompted for credentials:
+
+- **Username:** `meshadmin`
+- **Password:** `SquashyGrapes2026`
+
+Once authenticated, the admin panel provides:
+
+#### Serial Connection
+Connect or disconnect from the sink device. Select the serial port and baud rate (default 115200).
+
+#### Mesh Cycle Settings
+- **Suspend Duration (s)** — How long the mesh sleeps per cycle.
+- **Wake Duration (s)** — How long the mesh stays awake per cycle.
+- **Firmware ON Delay (s)** — Time the device remains on after triggering a suspend (matches compiled firmware constant, default 20s).
+- **Publish TX Power (dBm)** — Signal strength from −40 to +8 dBm.
+- **Suspend Mesh Now** — Immediately triggers the suspend sequence.
+- **Enable Auto Cycle** — Toggle to automatically cycle the mesh between Wake and Suspend phases.
+
+#### Data Management
+- **Load CDB JSON** — Upload an nRF Mesh CDB `.json` file to map element addresses to human-readable names. Persists across reboots.
+- **Prune (s)** — Removes duplicate readings that occurred within the specified window (seconds) for the same sensor.
+- **Clear All Data** — Deletes all rows from `sensor_data` while keeping the table structure intact. Useful for clearing test data before a real deployment.
+
+#### System Log
+Real-time console showing serial RX, database inserts, auto-cycle transitions, and errors.
+
+---
+
+## Temperature Display
+
+All temperatures are stored internally in **Celsius** as floating-point values for precision. They are converted to **Fahrenheit** for all display and export purposes:
+
+- **Web UI:** Displayed as `XX.X °F` (1 decimal place).
+- **CSV export:** `Top (°F)` and `Bottom (°F)` columns, 1 decimal place.
+
+---
+
+## CSV Export Format
+
+Each row in the exported CSV represents one **paired reading event** for a node (one Top + one Bottom reading). Columns:
+
+| Column | Description |
+|---|---|
+| Timestamp | Date/time of the most recent reading in the pair |
+| Node Address | Hex address of the node (e.g. `0x1100`) |
+| Node Name | Human-readable name from CDB, or auto-generated |
+| Top (°F) | Top sensor reading in Fahrenheit |
+| Bottom (°F) | Bottom sensor reading in Fahrenheit |
+
+Rows are sorted chronologically.
+
+---
+
+## Auto-Connect
+
+The application automatically attempts to connect to the serial device on startup. Configure at the top of `sink_handler.py`:
+
+```python
+PI_AUTO_CONNECT  = True
+PI_SERIAL_PORT   = "/dev/lergrec_gateway"
+PI_BAUD_RATE     = 115200
+PI_RETRY_DELAY   = 5     # seconds between retries
+PI_MAX_RETRIES   = 12    # set 0 to retry indefinitely
+```
+
+---
 
 ## Data Format
-The application expects incoming serial data from the Sink device to be formatted as JSON strings:
+
+The application expects incoming serial JSON:
 ```json
-{"name":"top_sensor","addr":4352,"value":25}
+{"name": "top_sensor", "addr": 4352, "value": 24.7}
 ```
-When this format is detected on the serial line, it extracts the data and inserts it into the `sensor_data` SQL table along with a timestamp.
 
-## Access & Dashboard Formatting
-
-**Public Dashboard:** The base URL provides a read-only view of the latest temperature readings (converted to Fahrenheit) and a button to download the structured CSV.
-
-**Admin Portal:**
-To access mesh control commands, live serial logs, and database management tools, click **Admin Access**.
-* **Username:** `meshadmin`
-* **Password:** `SquashyGrapes2026`
-
-**Data Handling:** * **Precision:** The Python backend parses incoming Celsius values as floats, converts them to Fahrenheit, and stores them in SQLite. 
-* **CSV Export:** The `/api/export_csv` route pivots the database. It groups readings by the minute received, outputting a single row per time window with discrete columns for `Top_Temp (°F)` and `Bottom_Temp (°F)`.
-* **Clearing Test Data:** Use the "Clear Database Data" button in the Admin panel to truncate the SQLite table before a live deployment.
+- `name` — Sensor identifier. Names containing `"top"` are treated as top readings; `"bot"` as bottom.
+- `addr` — 16-bit unicast address of the element.
+- `value` — Temperature in Celsius (floating-point for precision).

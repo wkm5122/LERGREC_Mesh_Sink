@@ -1,46 +1,202 @@
-<div class="card config-card">
-                    <h2>Controls & Config</h2>
-                    
-                    <div class="config-group">
-                        <label>Suspend Duration (s)</label>
-                        <div class="input-row">
-                            <input type="number" id="suspend-duration" value="60">
-                            <button id="btn-set-suspend">Set</button>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sink Data Handler</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="dashboard">
+    <header class="glass-panel">
+        <h1>🍇 SinkHandler <span class="tagline">Vineyard Edition</span></h1>
+        <div class="header-actions">
+            <button class="btn-tertiary" id="adminBtn" onclick="openAdmin()">⚙ Admin</button>
+        </div>
+    </header>
+
+    <div class="grid-layout">
+
+        <!-- Status Card -->
+        <section class="panel glass-panel status-panel">
+            <h2>System Status</h2>
+            <div class="status-indicator">
+                <div class="dot" id="statusDot"></div>
+                <span id="statusText">Status: Ready</span>
+            </div>
+            <div class="status-meta" id="statusMeta"></div>
+        </section>
+
+        <!-- Export Card -->
+        <section class="panel glass-panel export-panel">
+            <h2>Data Export</h2>
+            <p class="muted-text">Download all sensor readings as a CSV file. Each row contains the paired Top and Bottom readings (°F) for each node.</p>
+            <a href="/api/data/export" class="btn-primary btn-export" download>⬇ Download CSV</a>
+        </section>
+
+        <!-- Node Readings (Full Width) -->
+        <section class="panel glass-panel readings-panel">
+            <div class="panel-header">
+                <h2>Latest Node Readings</h2>
+                <span class="muted-text" id="readingsTimestamp"></span>
+            </div>
+            <div id="nodeCards" class="node-grid">
+                <div class="loading-text">Loading readings...</div>
+            </div>
+        </section>
+
+    </div>
+</div>
+
+<!-- ===================== ADMIN OVERLAY ===================== -->
+<div id="adminOverlay" class="overlay hidden">
+    <div class="overlay-backdrop" onclick="closeAdmin()"></div>
+    <div class="overlay-panel glass-panel">
+
+        <!-- Login View -->
+        <div id="adminLogin" class="admin-section">
+            <h2>🔒 Admin Access</h2>
+            <p class="muted-text" style="margin-bottom: 20px;">Enter your credentials to access admin controls.</p>
+            <div class="form-grid">
+                <div class="input-group">
+                    <label>Username</label>
+                    <input type="text" id="loginUser" autocomplete="username" placeholder="Username">
+                </div>
+                <div class="input-group">
+                    <label>Password</label>
+                    <input type="password" id="loginPass" autocomplete="current-password" placeholder="Password" onkeydown="if(event.key==='Enter') doLogin()">
+                </div>
+            </div>
+            <div id="loginError" class="error-msg hidden">Invalid username or password.</div>
+            <div class="admin-footer">
+                <button class="btn-tertiary" onclick="closeAdmin()">Cancel</button>
+                <button class="btn-primary" onclick="doLogin()">Login</button>
+            </div>
+        </div>
+
+        <!-- Admin Dashboard View -->
+        <div id="adminDash" class="admin-section hidden">
+            <div class="admin-dash-header">
+                <h2>⚙ Admin Panel</h2>
+                <button class="btn-tertiary btn-sm" onclick="doLogout()">Logout</button>
+            </div>
+
+            <!-- Connection -->
+            <div class="admin-card">
+                <h3>Serial Connection</h3>
+                <div class="connection-bar">
+                    <div class="input-group">
+                        <label>Port</label>
+                        <div class="flex-row">
+                            <select id="portSelect"></select>
+                            <button class="btn-icon" onclick="fetchPorts()" title="Refresh Ports">↻</button>
                         </div>
                     </div>
+                    <div class="input-group">
+                        <label>Baud</label>
+                        <select id="baudSelect">
+                            <option value="9600">9600</option>
+                            <option value="19200">19200</option>
+                            <option value="38400">38400</option>
+                            <option value="57600">57600</option>
+                            <option value="115200" selected>115200</option>
+                        </select>
+                    </div>
+                    <div class="input-group" style="justify-content: flex-end;">
+                        <label>&nbsp;</label>
+                        <button id="connectBtn" class="btn-primary" onclick="toggleConnect()">Connect</button>
+                    </div>
+                </div>
+            </div>
 
-                    <div class="config-group">
+            <!-- Cycle Settings -->
+            <div class="admin-card">
+                <h3>Mesh Cycle Settings</h3>
+                <div class="form-grid two-col">
+                    <div class="input-group">
+                        <label>Suspend Duration (s)</label>
+                        <div class="flex-row">
+                            <input type="number" id="suspendDur" value="60">
+                            <button class="btn-secondary" onclick="updateConfig()">Set</button>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label>Wake Duration (s)</label>
+                        <input type="number" id="wakeDur" value="30" onchange="updateConfig()">
+                    </div>
+                    <div class="input-group">
+                        <label>Firmware ON Delay (s)</label>
+                        <input type="number" id="onDelay" value="20" onchange="updateConfig()">
+                    </div>
+                    <div class="input-group">
                         <label>Publish TX Power (dBm)</label>
-                        <div class="input-row">
-                            <select id="tx-power">
-                                <option value="0">0</option>
+                        <div class="flex-row">
+                            <select id="txPower">
+                                <option value="8">8</option>
+                                <option value="4">4</option>
+                                <option value="0" selected>0</option>
+                                <option value="-3">-3</option>
                                 <option value="-4">-4</option>
                                 <option value="-8">-8</option>
+                                <option value="-12">-12</option>
+                                <option value="-16">-16</option>
+                                <option value="-18">-18</option>
                                 <option value="-20">-20</option>
+                                <option value="-28">-28</option>
+                                <option value="-40">-40</option>
                             </select>
-                            <button id="btn-set-tx">Set</button>
+                            <button class="btn-secondary" onclick="setTxPower()">Set</button>
                         </div>
                     </div>
-
-                    <div class="config-group">
-                        <label>Wake Duration (s)</label>
-                        <input type="number" id="wake-duration" value="30">
-                    </div>
-
-                    <div class="config-group">
-                        <label>Firmware ON Delay (s)</label>
-                        <input type="number" id="firmware-delay" value="20">
-                    </div>
-
-                    <button id="btn-suspend-now" class="full-width warning-btn">Suspend Mesh Now</button>
-                    
-                    <div class="toggle-group" style="margin-top: 15px; margin-bottom: 15px;">
+                </div>
+                <div class="actions-row">
+                    <button class="btn-warning" onclick="suspendNow()">Suspend Mesh Now</button>
+                    <div class="toggle-container">
                         <label class="switch">
-                            <input type="checkbox" id="toggle-auto-cycle">
-                            <span class="slider round"></span>
+                            <input type="checkbox" id="autoCycleToggle" onchange="updateConfig()">
+                            <span class="slider"></span>
                         </label>
                         <span>Enable Auto Cycle</span>
                     </div>
-
-                    <button id="btn-clear-db" class="full-width action-btn" style="background: #e74c3c; border: 1px solid #c0392b;">Clear Database Data</button>
                 </div>
+            </div>
+
+            <!-- CDB + Data Management -->
+            <div class="admin-card">
+                <h3>Data Management</h3>
+                <div class="data-tools">
+                    <button class="btn-tertiary" onclick="document.getElementById('cdbUpload').click()">📂 Load CDB JSON</button>
+                    <input type="file" id="cdbUpload" style="display:none;" accept=".json" onchange="uploadCDB(this)">
+
+                    <div class="divider"></div>
+
+                    <input type="number" id="pruneTime" value="4" style="width:60px;" title="Prune window (seconds)">
+                    <button class="btn-secondary" onclick="pruneData()" title="Remove duplicate readings within N seconds">Prune (s)</button>
+
+                    <div class="divider"></div>
+
+                    <button class="btn-danger" onclick="clearData()">🗑 Clear All Data</button>
+                </div>
+            </div>
+
+            <!-- System Log -->
+            <div class="admin-card">
+                <div class="panel-header">
+                    <h3>System Log</h3>
+                    <div class="actions-small">
+                        <label class="checkbox-label"><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
+                        <button class="btn-tertiary btn-sm" onclick="clearLogs()">Clear</button>
+                    </div>
+                </div>
+                <div id="logArea" class="log-area"></div>
+            </div>
+
+        </div><!-- /adminDash -->
+    </div><!-- /overlay-panel -->
+</div><!-- /adminOverlay -->
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

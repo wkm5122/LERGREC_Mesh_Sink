@@ -1,220 +1,833 @@
-import serial
+import os
+import time
 import json
 import sqlite3
-import time
 import threading
-import io
-import csv
-from flask import Flask, jsonify, request, Response, send_from_directory
+from datetime import datetime
+import serial
+import serial.tools.list_ports
+from flask import Flask, render_template, request, jsonify, Response, session
+from functools import wraps
 
-app = Flask(__name__, static_folder='static')
+app = Flask(__name__)
+app.secret_key = os.urandom(24)  # For session-based admin auth
 
-DB_FILE = 'sensor_data.db'
-SERIAL_PORT = '/dev/lergrec_gateway'
-BAUD_RATE = 115200
+# ---------------------------------------------------------------------------
+# Raspberry Pi Auto-Connect Configuration
+# ---------------------------------------------------------------------------
+# Set PI_AUTO_CONNECT = True to have the program automatically connect to the
+# sink device on startup without any manual action in the web UI.
+#
+# PI_SERIAL_PORT : the device path for the UART-to-USB adapter.
+#   Common values on Raspberry Pi:
+#     /dev/ttyUSB0  — CP210x / CH340 USB-UART adapters (most common)
+#     /dev/ttyACM0  — CDC-ACM class devices
+# PI_BAUD_RATE    : must match the baud rate configured on the sink device.
+# PI_RETRY_DELAY  : seconds to wait between each connection attempt.
+# PI_MAX_RETRIES  : total attempts before giving up (0 = try forever).
+# ---------------------------------------------------------------------------
+PI_AUTO_CONNECT  = True
+PI_SERIAL_PORT   = "/dev/lergrec_gateway"
+PI_BAUD_RATE     = 115200
+PI_RETRY_DELAY   = 5    # seconds between retries
+PI_MAX_RETRIES   = 12   # give up after ~60 s; set 0 to retry indefinitely
 
-# Global state
-mesh_config = {
-    "suspend_duration": 60,
-    "wake_duration": 30,
-    "firmware_delay": 20,
-    "tx_power": 0,
-    "auto_cycle": False
-}
-cycle_state = "Ready" 
-latest_logs = []
+# ---------------------------------------------------------------------------
+# Admin Credentials
+# ---------------------------------------------------------------------------
+ADMIN_USERNAME = "meshadmin"
+ADMIN_PASSWORD = "SquashyGrapes2026"
 
-def log_msg(msg):
-    timestamp = time.strftime("%H:%M:%S")
-    formatted = f"{timestamp} - {msg}"
-    print(formatted, flush=True)
-    latest_logs.append(formatted)
-    if len(latest_logs) > 50:
-        latest_logs.pop(0)
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS sensor_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            name TEXT,
-            addr INTEGER,
-            value REAL
-        )
-    ''')
-    conn.commit()
-    conn.close()
+def celsius_to_fahrenheit(c):
+    """Convert a Celsius float to Fahrenheit, returning a float."""
+    return (float(c) * 9.0 / 5.0) + 32.0
 
-def process_line(line):
-    try:
-        json_str = line[line.find("{"):line.rfind("}")+1]
-        if not json_str: return
 
-        payload = json.loads(json_str)
-        name = payload.get('name', 'unknown')
-        addr = payload.get('addr', 0)
+def require_admin(f):
+    """Decorator: returns 401 if admin is not authenticated."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('admin_logged_in'):
+            return jsonify({"success": False, "msg": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+class SinkHandlerCore:
+    def __init__(self):
+        self.serial_port = None
+        self.is_connected = False
+        self.stop_threads = False
+        self.last_sent_duration = None
         
-        # Parse Celsius value as float for maximum precision
-        val_c = float(payload.get('value', 0.0))
+        self.db_file = "sensor_data.db"
+        self.settings_file = "settings.json"
         
-        # Convert to Fahrenheit and round to 1 decimal place
-        val_f = round((val_c * 9/5) + 32, 1)
+        # State
+        self.suspend_dur = 60
+        self.wake_dur = 30
+        self.on_delay = 20
+        self.auto_cycle_enabled = False
+        self.current_status = "Ready"
+        self.current_status_color = "blue"
 
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('INSERT INTO sensor_data (name, addr, value) VALUES (?, ?, ?)', (name, addr, val_f))
-        conn.commit()
-        conn.close()
+        # Logs
+        self.logs = []
+        
+        self._init_db()
+        self._load_settings()
 
-        log_msg(f"DATA: {name} (Addr: {addr}) = {val_f}°F")
+    def _init_db(self):
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS sensor_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    name TEXT,
+                    addr INTEGER,
+                    value REAL
+                )
+            ''')
+            # Clean up previously logged 32-bit addresses
+            cursor.execute("UPDATE sensor_data SET addr = addr & 65535 WHERE addr < 0 OR addr > 65535")
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS node_elements (
+                    unicast_addr INTEGER PRIMARY KEY,
+                    parent_uuid TEXT,
+                    location TEXT,
+                    name TEXT
+                )
+            ''')
+            conn.commit()
 
-    except json.JSONDecodeError:
-        pass
-    except Exception as e:
-        log_msg(f"Error processing data: {e}")
-
-def serial_worker():
-    global cycle_state
-    ser = None
-    
-    while True:
+    def _load_settings(self):
         try:
-            if ser is None:
-                log_msg(f"Auto-connect: looking for {SERIAL_PORT} @ {BAUD_RATE} ...")
-                ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-                log_msg(f"Connected to {SERIAL_PORT} at {BAUD_RATE}")
-                log_msg("Auto-connect: connected successfully.")
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    cdb_file = settings.get("cdb_file")
+                    if cdb_file and os.path.exists(cdb_file):
+                        self.log(f"Auto-loading CDB JSON from settings...")
+                        self.load_cdb_json(filepath=cdb_file)
+        except Exception as e:
+            self.log(f"Error loading settings: {e}")
 
-            if ser.in_waiting > 0:
-                raw_line = ser.readline()
-                try:
-                    line = raw_line.decode('utf-8').strip()
+    def _save_settings(self, key, value):
+        settings = {}
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+            except:
+                pass
+        settings[key] = value
+        try:
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f, indent=4)
+        except Exception as e:
+            self.log(f"Error saving settings: {e}")
+
+    def log(self, message):
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        entry = f"{timestamp} - {message}"
+        self.logs.append(entry)
+        # Keep logs manageable
+        if len(self.logs) > 1000:
+            self.logs = self.logs[-500:]
+        print(entry)
+
+    def update_status(self, text, color):
+        self.current_status = text
+        self.current_status_color = color
+
+    def get_ports(self):
+        return [p.device for p in serial.tools.list_ports.comports()]
+
+    def connect(self, port, baud):
+        if self.is_connected:
+            return False, "Already connected"
+        try:
+            baud = int(baud)
+            self.serial_port = serial.Serial(port, baud, timeout=1)
+            self.is_connected = True
+            self.stop_threads = False
+            self.read_thread = threading.Thread(target=self.read_serial, daemon=True)
+            self.read_thread.start()
+            
+            self.auto_cycle_thread = threading.Thread(target=self.auto_cycle_loop, daemon=True)
+            self.auto_cycle_thread.start()
+            
+            self.log(f"Connected to {port} at {baud} baud")
+            return True, "Connected"
+        except Exception as e:
+            self.log(f"Connection Failed: {e}")
+            return False, str(e)
+
+    def disconnect(self):
+        if not self.is_connected:
+            return False, "Not connected"
+        
+        self.is_connected = False
+        self.stop_threads = True
+        if self.serial_port:
+            self.serial_port.close()
+            self.serial_port = None
+        self.log("Disconnected")
+        self.update_status("Status: Ready", "blue")
+        return True, "Disconnected"
+
+    def send_command(self, cmd):
+        if self.serial_port and self.is_connected:
+            full_cmd = f"{cmd}\r\n"
+            try:
+                for char in full_cmd:
+                    self.serial_port.write(char.encode())
+                    self.serial_port.flush() 
+                    time.sleep(0.05)
+                self.log(f"Sent: {cmd}")
+                return True
+            except Exception as e:
+                self.log(f"Send Error: {e}")
+                return False
+        else:
+            self.log("Error: Not Connected")
+            return False
+
+    def set_duration(self, dur):
+        try:
+            dur = int(dur)
+            self.suspend_dur = dur
+            self.send_command(f"mesh_app set_level {dur}")
+            self.last_sent_duration = dur
+            return True
+        except ValueError:
+            self.log("Invalid Duration")
+            return False
+
+    def set_tx_power(self, pwr_lvl):
+        if pwr_lvl is not None and str(pwr_lvl).strip():
+            self.send_command(f"publish_tx_power {pwr_lvl}")
+            return True
+        else:
+            self.log("Invalid TX Power Level")
+            return False
+
+    def suspend_mesh(self):
+        self.send_command("mesh_app set_onoff_temp")
+
+    def toggle_auto_cycle(self, enable):
+        self.auto_cycle_enabled = enable is True or str(enable).lower() == 'true'
+        if self.auto_cycle_enabled:
+            self.log("Auto Cycle ENABLED")
+        else:
+            self.log("Auto Cycle DISABLED")
+            self.update_status("Status: Ready", "blue")
+
+    def read_serial(self):
+        while not self.stop_threads and self.is_connected:
+            try:
+                if self.serial_port and self.serial_port.in_waiting:
+                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        if not line.startswith("uart:~$"):
-                            log_msg(f"RX: {line}")
-                        process_line(line)
-                except UnicodeDecodeError:
-                    pass
+                        self.process_line(line)
+                else:
+                    time.sleep(0.1)
+            except Exception as e:
+                self.log(f"Read Error: {e}")
+                break
+        self.log("Read Thread Stopped")
 
-            if mesh_config["auto_cycle"]:
-                cycle_state = "Wake"
-                time.sleep(mesh_config["wake_duration"])
+    def process_line(self, line):
+        self.log(f"RX: {line}") 
+        
+        if "{" in line and "}" in line:
+            try:
+                start = line.find('{')
+                end = line.rfind('}') + 1
+                json_str = line[start:end]
                 
-                cmd = f"mesh_app set_level {mesh_config['suspend_duration']}\n"
-                ser.write(cmd.encode('utf-8'))
-                log_msg(f"Sent Level Set ({mesh_config['suspend_duration']}) to All Nodes")
+                data = json.loads(json_str)
+                
+                if "name" in data and "value" in data:
+                    name = data["name"]
+                    value = data["value"]
+                    try:
+                        addr = int(data.get("addr", 0)) & 0xFFFF
+                    except ValueError:
+                        addr = 0
+                    
+                    self.log(f"DATA: {name} (Addr: {addr}) = {value}")
+                    
+                    try:
+                        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+                            cursor = conn.cursor()
+                            cursor.execute('''
+                                INSERT INTO sensor_data (timestamp, name, addr, value)
+                                VALUES (?, ?, ?, ?)
+                            ''', (datetime.now().isoformat(), name, addr, value))
+                            conn.commit()
+                    except Exception as e:
+                        self.log(f"DB Error: {e}")
+            except json.JSONDecodeError:
+                pass
+            except Exception as e:
+                self.log(f"Parse Error: {e}")
+
+    def auto_cycle_loop(self):
+        state = "WAKE"
+        timer = 0
+        
+        while not self.stop_threads and self.is_connected:
+            if not self.auto_cycle_enabled:
+                state = "WAKE"
+                timer = 0
+                time.sleep(0.5)
+                continue
+
+            if state == "WAKE":
+                if timer == 0:
+                    self.update_status(f"Auto Status: WAKE Phase ({self.wake_dur}s)", "green")
                 
                 time.sleep(1)
+                timer += 1
                 
-                cmd2 = "mesh_app set_onoff_temp\n"
-                ser.write(cmd2.encode('utf-8'))
-                log_msg("Sent OnOff Set (On) to All Nodes. Turning off in 3s...")
+                if timer >= self.wake_dur:
+                    state = "SUSPEND_INIT"
+                    timer = 0
+                    
+            elif state == "SUSPEND_INIT":
+                if self.last_sent_duration != self.suspend_dur:
+                    self.log(f"Updating Suspend Duration to {self.suspend_dur}s")
+                    self.send_command(f"mesh_app set_level {self.suspend_dur}")
+                    self.last_sent_duration = self.suspend_dur
+                else:
+                    self.log(f"Suspend Duration ({self.suspend_dur}s) unchanged, skipping set_level")
                 
-                cycle_state = "Suspend"
-                time.sleep(mesh_config["suspend_duration"])
+                time.sleep(0.5)
+                self.send_command("mesh_app set_onoff_temp")
+                self.update_status(f"Auto Status: SUSPEND Phase ({self.on_delay}s ON, {self.suspend_dur}s OFF)", "red")
+                
+                state = "SUSPEND_WAIT"
+                timer = 0
+            
+            elif state == "SUSPEND_WAIT":
+                # Wait for both the ON delay + Suspend
+                total_wait = self.suspend_dur + self.on_delay
+                time.sleep(1)
+                timer += 1
+                
+                if timer >= total_wait:
+                    state = "WAKE"
+                    timer = 0
+
+    def get_latest_readings(self):
+        """
+        Returns the most recent top and bottom readings for each node address,
+        with temperatures converted to Fahrenheit.
+        """
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            # Get all distinct addresses
+            cursor.execute("SELECT DISTINCT addr FROM sensor_data ORDER BY addr")
+            addrs = [row[0] for row in cursor.fetchall()]
+
+            nodes = []
+            for addr in addrs:
+                # Get node name from node_elements if available
+                cursor.execute(
+                    "SELECT name FROM node_elements WHERE unicast_addr = ?", (addr,)
+                )
+                ne_row = cursor.fetchone()
+                node_label = ne_row[0] if ne_row else f"Node 0x{addr:04X}"
+
+                # Latest top reading
+                cursor.execute(
+                    """SELECT value, timestamp FROM sensor_data
+                       WHERE addr = ? AND name LIKE '%top%'
+                       ORDER BY id DESC LIMIT 1""",
+                    (addr,)
+                )
+                top_row = cursor.fetchone()
+
+                # Latest bottom reading
+                cursor.execute(
+                    """SELECT value, timestamp FROM sensor_data
+                       WHERE addr = ? AND name LIKE '%bot%'
+                       ORDER BY id DESC LIMIT 1""",
+                    (addr,)
+                )
+                bot_row = cursor.fetchone()
+
+                # Fall back: if no top/bottom naming, grab the two most recent readings
+                if top_row is None and bot_row is None:
+                    cursor.execute(
+                        """SELECT name, value, timestamp FROM sensor_data
+                           WHERE addr = ?
+                           ORDER BY id DESC LIMIT 2""",
+                        (addr,)
+                    )
+                    fallback = cursor.fetchall()
+                    if len(fallback) >= 1:
+                        top_row = (fallback[0][1], fallback[0][2])
+                    if len(fallback) >= 2:
+                        bot_row = (fallback[1][1], fallback[1][2])
+
+                def fmt_f(val):
+                    if val is None:
+                        return None
+                    return round(celsius_to_fahrenheit(val), 1)
+
+                nodes.append({
+                    "addr": addr,
+                    "label": node_label,
+                    "top_f": fmt_f(top_row[0]) if top_row else None,
+                    "top_ts": top_row[1][:19].replace("T", " ") if top_row else None,
+                    "bot_f": fmt_f(bot_row[0]) if bot_row else None,
+                    "bot_ts": bot_row[1][:19].replace("T", " ") if bot_row else None,
+                })
+            return nodes
+
+    def query_data(self, addr=None):
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            if addr:
+                try:
+                    addr_int = int(addr)
+                    query = '''
+                        SELECT s.id, s.timestamp, s.name, s.addr, 
+                               IFNULL(n.location, 'Unknown'), IFNULL(n.parent_uuid, 'Unknown'), 
+                               s.value 
+                        FROM sensor_data s
+                        LEFT JOIN node_elements n ON s.addr = n.unicast_addr
+                        WHERE s.addr = ? 
+                        ORDER BY s.id DESC
+                    '''
+                    cursor.execute(query, (addr_int,))
+                except ValueError:
+                    return []
             else:
-                cycle_state = "Ready"
-                time.sleep(0.1)
+                query = '''
+                    SELECT s.id, s.timestamp, s.name, s.addr, 
+                           IFNULL(n.location, 'Unknown'), IFNULL(n.parent_uuid, 'Unknown'), 
+                           s.value 
+                    FROM sensor_data s
+                    LEFT JOIN node_elements n ON s.addr = n.unicast_addr
+                    ORDER BY s.id DESC
+                '''
+                cursor.execute(query)
+            
+            rows = cursor.fetchall()
+            return rows
 
-        except serial.SerialException:
-            if ser:
-                ser.close()
-                ser = None
-            time.sleep(5)
+    def export_pivoted_csv(self):
+        """
+        Returns a CSV string where each row is one node, with columns:
+        Timestamp, Node Address, Node Name, Top (°F), Bottom (°F)
+
+        Uses the most recent pair of readings per node per "session" —
+        iterates all data chronologically and groups by addr, emitting a row
+        each time both top and bottom have been seen since the last emit.
+        """
+        import csv
+        from io import StringIO
+
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT s.timestamp, s.addr, s.name, s.value,
+                       IFNULL(n.name, 'Node 0x' || printf('%04X', s.addr)) AS node_name
+                FROM sensor_data s
+                LEFT JOIN node_elements n ON s.addr = n.unicast_addr
+                ORDER BY s.addr, s.id ASC
+            ''')
+            rows = cursor.fetchall()
+
+        # Group by addr; accumulate top+bottom pairs
+        from collections import defaultdict
+        addr_buf = defaultdict(lambda: {"top": None, "top_ts": None, "bot": None, "bot_ts": None, "name": ""})
+        output_rows = []
+
+        for ts, addr, name, value_c, node_name in rows:
+            buf = addr_buf[addr]
+            buf["name"] = node_name
+            name_lower = name.lower()
+
+            if "top" in name_lower:
+                buf["top"] = value_c
+                buf["top_ts"] = ts
+            elif "bot" in name_lower:
+                buf["bot"] = value_c
+                buf["bot_ts"] = ts
+            else:
+                # Unknown sensor name — treat first as top, second as bot
+                if buf["top"] is None:
+                    buf["top"] = value_c
+                    buf["top_ts"] = ts
+                else:
+                    buf["bot"] = value_c
+                    buf["bot_ts"] = ts
+
+            # Emit a row once we have both readings
+            if buf["top"] is not None and buf["bot"] is not None:
+                emit_ts = buf["top_ts"] if buf["top_ts"] >= buf["bot_ts"] else buf["bot_ts"]
+                output_rows.append({
+                    "timestamp": emit_ts[:19].replace("T", " "),
+                    "addr": f"0x{addr:04X}",
+                    "name": buf["name"],
+                    "top_f": round(celsius_to_fahrenheit(buf["top"]), 1),
+                    "bot_f": round(celsius_to_fahrenheit(buf["bot"]), 1),
+                })
+                # Reset for the next pair
+                addr_buf[addr] = {"top": None, "top_ts": None, "bot": None, "bot_ts": None, "name": node_name}
+
+        # Sort final output by timestamp
+        output_rows.sort(key=lambda r: r["timestamp"])
+
+        si = StringIO()
+        cw = csv.writer(si)
+        cw.writerow(["Timestamp", "Node Address", "Node Name", "Top (°F)", "Bottom (°F)"])
+        for r in output_rows:
+            cw.writerow([r["timestamp"], r["addr"], r["name"], r["top_f"], r["bot_f"]])
+
+        return si.getvalue()
+
+    def clear_db_data(self):
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM sensor_data")
+            conn.commit()
+        self.log("Database cleared by admin.")
+
+    def prune_duplicates(self, prune_seconds):
+        try:
+            prune_seconds = float(prune_seconds)
+            with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, timestamp, name, addr, value FROM sensor_data ORDER BY timestamp ASC")
+                rows = cursor.fetchall()
+                
+                if not rows:
+                    self.log("No data to prune.")
+                    return 0
+                
+                ids_to_delete = []
+                last_seen = {} 
+                
+                for r in rows:
+                    r_id, ts_str, name, addr, val = r
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue 
+                    
+                    key = (name, addr, val)
+                    
+                    if key in last_seen:
+                        last_ts, _ = last_seen[key]
+                        time_diff = (ts - last_ts).total_seconds()
+                        if 0 <= time_diff <= prune_seconds:
+                            ids_to_delete.append(r_id)
+                            continue 
+                        
+                    last_seen[key] = (ts, r_id)
+
+                if ids_to_delete:
+                    cursor.executemany("DELETE FROM sensor_data WHERE id = ?", [(i,) for i in ids_to_delete])
+                    conn.commit()
+                    self.log(f"Pruned {len(ids_to_delete)} duplicate readings.")
+                    return len(ids_to_delete)
+                else:
+                    self.log(f"No duplicates found within {prune_seconds} seconds.")
+                    return 0
         except Exception as e:
-            log_msg(f"Worker error: {e}")
-            time.sleep(1)
+            self.log(f"Prune Error: {e}")
+            return -1
 
-# --- Flask Routes ---
+    def load_cdb_json(self, filepath=None, json_content=None):
+        try:
+            if filepath:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    cdb = json.load(f)
+            elif json_content:
+                cdb = json.loads(json_content)
+                filepath = "uploaded_cdb.json"
+            else:
+                return False, "No data provided"
+                
+            nodes = cdb.get("nodes", [])
+            mapped_count = 0
+            
+            with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+                cursor = conn.cursor()
+                
+                for node in nodes:
+                    uuid = node.get("UUID")
+                    if not uuid: continue
+                    
+                    node_unicast_str = node.get("unicastAddress", "0000")
+                    try:
+                        node_base_addr = int(node_unicast_str, 16)
+                    except ValueError:
+                        continue
+                        
+                    for element in node.get("elements", []):
+                        models = element.get("models", [])
+                        
+                        is_sensor = False
+                        for model in models:
+                            mid = model.get("modelId")
+                            if mid in ("1100", "1102"):
+                                is_sensor = True
+                                break
+                                
+                        if not is_sensor:
+                            continue
+                            
+                        element_index = element.get("index", 0)
+                        element_unicast_addr = node_base_addr + element_index
+                        
+                        location = element.get("location", "0000")
+                        name = element.get("name", f"Element: 0x{element_unicast_addr:04X}")
+                        
+                        cursor.execute('''
+                            INSERT INTO node_elements (unicast_addr, parent_uuid, location, name)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(unicast_addr) DO UPDATE SET
+                                parent_uuid=excluded.parent_uuid,
+                                location=excluded.location,
+                                name=excluded.name
+                        ''', (element_unicast_addr, uuid, location, name))
+                        
+                        mapped_count += 1
+                        
+                conn.commit()
+            
+            self.log(f"Successfully mapped {mapped_count} sensor elements from CDB.")
+            if filepath and not json_content:
+                self._save_settings("cdb_file", filepath)
+            return True, f"Mapped {mapped_count} elements."
+            
+        except Exception as e:
+            self.log(f"Error parsing CDB JSON: {e}")
+            return False, str(e)
+
+
+def auto_connect_on_startup(core_instance):
+    """Background thread: try to connect to PI_SERIAL_PORT at startup."""
+    if not PI_AUTO_CONNECT:
+        return
+
+    core_instance.log(f"Auto-connect: looking for {PI_SERIAL_PORT} @ {PI_BAUD_RATE} baud ...")
+    attempt = 0
+    while True:
+        attempt += 1
+        time.sleep(PI_RETRY_DELAY)
+
+        if os.path.exists(PI_SERIAL_PORT):
+            core_instance.log(f"Auto-connect: {PI_SERIAL_PORT} found (attempt {attempt}), connecting ...")
+            success, msg = core_instance.connect(PI_SERIAL_PORT, PI_BAUD_RATE)
+            if success:
+                core_instance.log("Auto-connect: connected successfully.")
+            else:
+                core_instance.log(f"Auto-connect: connection failed — {msg}")
+            return
+        else:
+            core_instance.log(
+                f"Auto-connect: {PI_SERIAL_PORT} not available yet "
+                f"(attempt {attempt}/{PI_MAX_RETRIES if PI_MAX_RETRIES else '∞'}) "
+                f"— retrying in {PI_RETRY_DELAY}s ..."
+            )
+
+        if PI_MAX_RETRIES and attempt >= PI_MAX_RETRIES:
+            core_instance.log(
+                f"Auto-connect: gave up after {attempt} attempts. "
+                "Connect manually via the web UI."
+            )
+            return
+
+
+core = SinkHandlerCore()
+
+# ---------------------------------------------------------------------------
+# Flask Routes — Public
+# ---------------------------------------------------------------------------
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    return render_template('index.html')
 
-@app.route('/static/<path:path>')
-def serve_static(path):
-    return send_from_directory('static', path)
-
-@app.route('/api/status')
+@app.route('/api/status', methods=['GET'])
 def get_status():
-    return jsonify({"cycle_state": cycle_state})
+    return jsonify({
+        "is_connected": core.is_connected,
+        "port": core.serial_port.port if core.serial_port else None,
+        "status_text": core.current_status,
+        "status_color": core.current_status_color,
+    })
 
-@app.route('/api/config', methods=['GET', 'POST'])
-def handle_config():
-    if request.method == 'POST':
-        data = request.json
-        for k, v in data.items():
-            if k in mesh_config:
-                mesh_config[k] = v
-        log_msg(f"Config updated: {data}")
-        return jsonify({"status": "success", "config": mesh_config})
-    return jsonify(mesh_config)
+@app.route('/api/readings', methods=['GET'])
+def get_readings():
+    """Returns the latest top/bottom Fahrenheit reading for each node."""
+    return jsonify(core.get_latest_readings())
 
-@app.route('/api/logs')
+@app.route('/api/data/export', methods=['GET'])
+def export_data():
+    """Export pivoted CSV: one row per node, Top (°F) and Bottom (°F) columns."""
+    csv_content = core.export_pivoted_csv()
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-disposition": "attachment; filename=sensor_data.csv"}
+    )
+
+# ---------------------------------------------------------------------------
+# Flask Routes — Admin Auth
+# ---------------------------------------------------------------------------
+
+@app.route('/api/admin/login', methods=['POST'])
+def admin_login():
+    data = request.json or {}
+    if data.get('username') == ADMIN_USERNAME and data.get('password') == ADMIN_PASSWORD:
+        session['admin_logged_in'] = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "msg": "Invalid credentials"}), 401
+
+@app.route('/api/admin/logout', methods=['POST'])
+def admin_logout():
+    session.pop('admin_logged_in', None)
+    return jsonify({"success": True})
+
+@app.route('/api/admin/check', methods=['GET'])
+def admin_check():
+    return jsonify({"authenticated": bool(session.get('admin_logged_in'))})
+
+# ---------------------------------------------------------------------------
+# Flask Routes — Admin Protected
+# ---------------------------------------------------------------------------
+
+@app.route('/api/admin/status', methods=['GET'])
+@require_admin
+def admin_get_status():
+    """Full status including cycle config — admin only."""
+    return jsonify({
+        "is_connected": core.is_connected,
+        "port": core.serial_port.port if core.serial_port else None,
+        "status_text": core.current_status,
+        "status_color": core.current_status_color,
+        "auto_cycle": core.auto_cycle_enabled,
+        "suspend_dur": core.suspend_dur,
+        "wake_dur": core.wake_dur,
+        "on_delay": core.on_delay
+    })
+
+@app.route('/api/ports', methods=['GET'])
+@require_admin
+def get_ports():
+    return jsonify(core.get_ports())
+
+@app.route('/api/connect', methods=['POST'])
+@require_admin
+def connect():
+    data = request.json
+    if core.is_connected:
+        success, msg = core.disconnect()
+        return jsonify({"success": success, "msg": msg})
+    else:
+        success, msg = core.connect(data.get('port'), data.get('baud', 115200))
+        return jsonify({"success": success, "msg": msg})
+
+@app.route('/api/config', methods=['POST'])
+@require_admin
+def config():
+    data = request.json
+    if 'suspend_dur' in data:
+        core.set_duration(data['suspend_dur'])
+    if 'wake_dur' in data:
+        try:
+            core.wake_dur = int(data['wake_dur'])
+        except: pass
+    if 'on_delay' in data:
+        try:
+            core.on_delay = int(data['on_delay'])
+        except: pass
+    if 'auto_cycle' in data:
+        core.toggle_auto_cycle(data['auto_cycle'])
+    if 'tx_power' in data:
+        core.set_tx_power(data['tx_power'])
+    return jsonify({"success": True})
+
+@app.route('/api/command', methods=['POST'])
+@require_admin
+def command():
+    data = request.json
+    if 'cmd' in data:
+        core.send_command(data['cmd'])
+    elif 'suspend_now' in data:
+        core.suspend_mesh()
+    return jsonify({"success": True})
+
+@app.route('/api/data/prune', methods=['POST'])
+@require_admin
+def prune_data():
+    prune_time = request.json.get('prune_time', 4)
+    res = core.prune_duplicates(prune_time)
+    return jsonify({"success": True, "pruned": res})
+
+@app.route('/api/data/clear', methods=['POST'])
+@require_admin
+def clear_data():
+    core.clear_db_data()
+    return jsonify({"success": True})
+
+@app.route('/api/cdb', methods=['POST'])
+@require_admin
+def upload_cdb():
+    if 'file' not in request.files:
+        return jsonify({"success": False, "msg": "No file part"})
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"success": False, "msg": "No selected file"})
+
+    if file:
+        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploaded_cdb.json")
+        content = file.read().decode('utf-8')
+        try:
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            return jsonify({"success": False, "msg": f"Failed to save CDB file: {e}"})
+        success, msg = core.load_cdb_json(filepath=save_path)
+        return jsonify({"success": success, "msg": msg})
+
+@app.route('/api/logs', methods=['GET'])
+@require_admin
 def get_logs():
-    return jsonify({"logs": latest_logs})
+    since = request.args.get('since', 0, type=int)
+    new_logs = core.logs[since:]
+    return jsonify({
+        "logs": new_logs,
+        "next_index": len(core.logs)
+    })
 
-@app.route('/api/data/latest')
-def get_latest_data():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT name, addr, value, timestamp 
-        FROM sensor_data 
-        WHERE id IN (
-            SELECT MAX(id) FROM sensor_data GROUP BY addr
+@app.route('/api/logs/clear', methods=['POST'])
+@require_admin
+def clear_logs():
+    core.logs = []
+    return jsonify({"success": True})
+
+
+if __name__ == "__main__":
+    os.makedirs('templates', exist_ok=True)
+    os.makedirs('static/css', exist_ok=True)
+    os.makedirs('static/js', exist_ok=True)
+
+    if PI_AUTO_CONNECT:
+        ac_thread = threading.Thread(
+            target=auto_connect_on_startup, args=(core,), daemon=True
         )
-    ''')
-    rows = c.fetchall()
-    conn.close()
-    
-    data = [{"name": r[0], "addr": r[1], "value": r[2], "timestamp": r[3]} for r in rows]
-    return jsonify(data)
+        ac_thread.start()
 
-@app.route('/api/admin/clear', methods=['POST'])
-def clear_database():
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('DELETE FROM sensor_data')
-        # Reset the auto-increment counter
-        c.execute('DELETE FROM sqlite_sequence WHERE name="sensor_data"') 
-        conn.commit()
-        conn.close()
-        log_msg("Admin action: Database wiped clean.")
-        return jsonify({"status": "success", "message": "Database cleared."})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route('/api/export_csv')
-def export_csv():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # Pivot query: Groups top and bottom sensors by the minute they were received
-    c.execute('''
-        SELECT 
-            strftime('%Y-%m-%d %H:%M', timestamp) as time_minute,
-            MAX(CASE WHEN name LIKE '%top%' THEN value END) as top_temp_F,
-            MAX(CASE WHEN name LIKE '%bottom%' THEN value END) as bottom_temp_F
-        FROM sensor_data
-        GROUP BY time_minute
-        ORDER BY time_minute DESC
-    ''')
-    rows = c.fetchall()
-    conn.close()
-
-    si = io.StringIO()
-    cw = csv.writer(si)
-    cw.writerow(['Timestamp (Minute)', 'Top_Temp (°F)', 'Bottom_Temp (°F)'])
-    cw.writerows(rows)
-    
-    output = si.getvalue()
-    return Response(output, mimetype='text/csv', headers={"Content-Disposition": "attachment;filename=lergrec_sensor_data.csv"})
-
-if __name__ == '__main__':
-    init_db()
-    t = threading.Thread(target=serial_worker, daemon=True)
-    t.start()
-    app.run(host='0.0.0.0', port=80, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
