@@ -323,65 +323,95 @@ class SinkHandlerCore:
                     state = "WAKE"
                     timer = 0
 
+    def _group_addrs_into_nodes(self, addrs):
+        """
+        Groups a sorted list of unicast addresses into node pairs.
+        BLE mesh assigns each element a consecutive address (base, base+1, ...).
+        A physical node with a top + bottom sensor therefore occupies two
+        consecutive addresses.  We pair them up: (15,16), (17,18), etc.
+        Any address whose partner is missing still gets its own node entry
+        so readings are never silently dropped.
+        """
+        pairs = []
+        used = set()
+        for addr in sorted(addrs):
+            if addr in used:
+                continue
+            partner = addr + 1
+            if partner in addrs and partner not in used:
+                pairs.append((addr, partner))
+                used.add(addr)
+                used.add(partner)
+            else:
+                pairs.append((addr, None))
+                used.add(addr)
+        return pairs
+
     def get_latest_readings(self):
         """
-        Returns the most recent top and bottom readings for each node address,
+        Returns the most recent top and bottom readings for each physical node,
         with temperatures converted to Fahrenheit.
+        Each node is identified by a consecutive address pair (top_addr, bot_addr).
         """
+        def fmt_f(val):
+            if val is None:
+                return None
+            return round(celsius_to_fahrenheit(val), 1)
+
         with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
             cursor = conn.cursor()
-            # Get all distinct addresses
             cursor.execute("SELECT DISTINCT addr FROM sensor_data ORDER BY addr")
             addrs = [row[0] for row in cursor.fetchall()]
 
+            pairs = self._group_addrs_into_nodes(addrs)
             nodes = []
-            for addr in addrs:
-                # Get node name from node_elements if available
+
+            for top_addr, bot_addr in pairs:
+                # Node label — prefer node_elements name for top addr
                 cursor.execute(
-                    "SELECT name FROM node_elements WHERE unicast_addr = ?", (addr,)
+                    "SELECT name FROM node_elements WHERE unicast_addr = ?", (top_addr,)
                 )
                 ne_row = cursor.fetchone()
-                node_label = ne_row[0] if ne_row else f"Node 0x{addr:04X}"
+                node_label = ne_row[0] if ne_row else f"Node 0x{top_addr:04X}"
 
-                # Latest top reading
+                # Latest top reading — search top_addr for any 'top' name,
+                # fall back to most recent reading on that addr
                 cursor.execute(
                     """SELECT value, timestamp FROM sensor_data
                        WHERE addr = ? AND name LIKE '%top%'
                        ORDER BY id DESC LIMIT 1""",
-                    (addr,)
+                    (top_addr,)
                 )
                 top_row = cursor.fetchone()
-
-                # Latest bottom reading
-                cursor.execute(
-                    """SELECT value, timestamp FROM sensor_data
-                       WHERE addr = ? AND name LIKE '%bot%'
-                       ORDER BY id DESC LIMIT 1""",
-                    (addr,)
-                )
-                bot_row = cursor.fetchone()
-
-                # Fall back: if no top/bottom naming, grab the two most recent readings
-                if top_row is None and bot_row is None:
+                if top_row is None:
                     cursor.execute(
-                        """SELECT name, value, timestamp FROM sensor_data
-                           WHERE addr = ?
-                           ORDER BY id DESC LIMIT 2""",
-                        (addr,)
+                        """SELECT value, timestamp FROM sensor_data
+                           WHERE addr = ? ORDER BY id DESC LIMIT 1""",
+                        (top_addr,)
                     )
-                    fallback = cursor.fetchall()
-                    if len(fallback) >= 1:
-                        top_row = (fallback[0][1], fallback[0][2])
-                    if len(fallback) >= 2:
-                        bot_row = (fallback[1][1], fallback[1][2])
+                    top_row = cursor.fetchone()
 
-                def fmt_f(val):
-                    if val is None:
-                        return None
-                    return round(celsius_to_fahrenheit(val), 1)
+                # Latest bottom reading — search bot_addr for any 'bot' name,
+                # fall back to most recent reading on that addr
+                bot_row = None
+                if bot_addr is not None:
+                    cursor.execute(
+                        """SELECT value, timestamp FROM sensor_data
+                           WHERE addr = ? AND name LIKE '%bot%'
+                           ORDER BY id DESC LIMIT 1""",
+                        (bot_addr,)
+                    )
+                    bot_row = cursor.fetchone()
+                    if bot_row is None:
+                        cursor.execute(
+                            """SELECT value, timestamp FROM sensor_data
+                               WHERE addr = ? ORDER BY id DESC LIMIT 1""",
+                            (bot_addr,)
+                        )
+                        bot_row = cursor.fetchone()
 
                 nodes.append({
-                    "addr": addr,
+                    "addr": top_addr,
                     "label": node_label,
                     "top_f": fmt_f(top_row[0]) if top_row else None,
                     "top_ts": top_row[1][:19].replace("T", " ") if top_row else None,
@@ -424,67 +454,77 @@ class SinkHandlerCore:
 
     def export_pivoted_csv(self):
         """
-        Returns a CSV string where each row is one node, with columns:
-        Timestamp, Node Address, Node Name, Top (°F), Bottom (°F)
+        Returns a CSV string where each row is one reading event per physical node.
+        Columns: Timestamp, Node Address, Node Name, Top (°F), Bottom (°F)
 
-        Uses the most recent pair of readings per node per "session" —
-        iterates all data chronologically and groups by addr, emitting a row
-        each time both top and bottom have been seen since the last emit.
+        Physical nodes are identified by consecutive address pairs (top_addr, top_addr+1).
+        Readings are paired chronologically by timestamp proximity. If one sensor
+        missed a reading, the row is still emitted with that column left blank.
         """
         import csv
         from io import StringIO
+        from collections import defaultdict
 
         with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT s.timestamp, s.addr, s.name, s.value,
-                       IFNULL(n.name, 'Node 0x' || printf('%04X', s.addr)) AS node_name
-                FROM sensor_data s
-                LEFT JOIN node_elements n ON s.addr = n.unicast_addr
-                ORDER BY s.addr, s.id ASC
-            ''')
-            rows = cursor.fetchall()
 
-        # Group by addr; accumulate top+bottom pairs
-        from collections import defaultdict
-        addr_buf = defaultdict(lambda: {"top": None, "top_ts": None, "bot": None, "bot_ts": None, "name": ""})
-        output_rows = []
+            # Get all distinct addresses and group into node pairs
+            cursor.execute("SELECT DISTINCT addr FROM sensor_data ORDER BY addr")
+            addrs = [row[0] for row in cursor.fetchall()]
+            pairs = self._group_addrs_into_nodes(addrs)
 
-        for ts, addr, name, value_c, node_name in rows:
-            buf = addr_buf[addr]
-            buf["name"] = node_name
-            name_lower = name.lower()
+            output_rows = []
 
-            if "top" in name_lower:
-                buf["top"] = value_c
-                buf["top_ts"] = ts
-            elif "bot" in name_lower:
-                buf["bot"] = value_c
-                buf["bot_ts"] = ts
-            else:
-                # Unknown sensor name — treat first as top, second as bot
-                if buf["top"] is None:
-                    buf["top"] = value_c
-                    buf["top_ts"] = ts
-                else:
-                    buf["bot"] = value_c
-                    buf["bot_ts"] = ts
+            for top_addr, bot_addr in pairs:
+                # Node label
+                cursor.execute(
+                    "SELECT name FROM node_elements WHERE unicast_addr = ?", (top_addr,)
+                )
+                ne_row = cursor.fetchone()
+                node_label = ne_row[0] if ne_row else f"Node 0x{top_addr:04X}"
+                node_addr_str = f"0x{top_addr:04X}"
 
-            # Emit a row once we have both readings
-            if buf["top"] is not None and buf["bot"] is not None:
-                emit_ts = buf["top_ts"] if buf["top_ts"] >= buf["bot_ts"] else buf["bot_ts"]
-                output_rows.append({
-                    "timestamp": emit_ts[:19].replace("T", " "),
-                    "addr": f"0x{addr:04X}",
-                    "name": buf["name"],
-                    "top_f": round(celsius_to_fahrenheit(buf["top"]), 1),
-                    "bot_f": round(celsius_to_fahrenheit(buf["bot"]), 1),
-                })
-                # Reset for the next pair
-                addr_buf[addr] = {"top": None, "top_ts": None, "bot": None, "bot_ts": None, "name": node_name}
+                # Fetch all top readings chronologically
+                cursor.execute(
+                    """SELECT timestamp, value FROM sensor_data
+                       WHERE addr = ? ORDER BY id ASC""",
+                    (top_addr,)
+                )
+                top_readings = cursor.fetchall()
 
-        # Sort final output by timestamp
-        output_rows.sort(key=lambda r: r["timestamp"])
+                # Fetch all bottom readings chronologically
+                bot_readings = []
+                if bot_addr is not None:
+                    cursor.execute(
+                        """SELECT timestamp, value FROM sensor_data
+                           WHERE addr = ? ORDER BY id ASC""",
+                        (bot_addr,)
+                    )
+                    bot_readings = cursor.fetchall()
+
+                # Pair them up by index — each cycle should produce one top + one bottom.
+                # If counts differ, the shorter side gets None for missing readings.
+                max_len = max(len(top_readings), len(bot_readings))
+                for i in range(max_len):
+                    top_ts, top_val = top_readings[i] if i < len(top_readings) else (None, None)
+                    bot_ts, bot_val = bot_readings[i] if i < len(bot_readings) else (None, None)
+
+                    # Use whichever timestamp is available; prefer the later one
+                    if top_ts and bot_ts:
+                        emit_ts = top_ts if top_ts >= bot_ts else bot_ts
+                    else:
+                        emit_ts = top_ts or bot_ts
+
+                    output_rows.append({
+                        "timestamp": emit_ts[:19].replace("T", " ") if emit_ts else "",
+                        "addr": node_addr_str,
+                        "name": node_label,
+                        "top_f": round(celsius_to_fahrenheit(top_val), 1) if top_val is not None else "",
+                        "bot_f": round(celsius_to_fahrenheit(bot_val), 1) if bot_val is not None else "",
+                    })
+
+        # Sort by timestamp then address
+        output_rows.sort(key=lambda r: (r["timestamp"], r["addr"]))
 
         si = StringIO()
         cw = csv.writer(si)
