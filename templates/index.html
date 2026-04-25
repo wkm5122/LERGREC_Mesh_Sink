@@ -27,6 +27,10 @@
                 <span id="statusText">Status: Ready</span>
             </div>
             <div class="status-meta" id="statusMeta"></div>
+            <div class="cycle-time-display" id="cycleTimeDisplay" style="display:none;">
+                <span class="cycle-time-label">Current Cycle Time:</span>
+                <span class="cycle-time-value" id="cycleTimeValue">—</span>
+            </div>
         </section>
 
         <!-- Export Card -->
@@ -119,16 +123,16 @@
                         <label>Suspend Duration (s)</label>
                         <div class="flex-row">
                             <input type="number" id="suspendDur" value="60">
-                            <button class="btn-secondary" onclick="updateConfig()">Set</button>
+                            <button class="btn-secondary" onclick="updateConfig(); updateCyclePreview()">Set</button>
                         </div>
                     </div>
                     <div class="input-group">
                         <label>Wake Duration (s)</label>
-                        <input type="number" id="wakeDur" value="30" onchange="updateConfig()">
+                        <input type="number" id="wakeDur" value="30" onchange="updateConfig(); updateCyclePreview()">
                     </div>
                     <div class="input-group">
                         <label>Firmware ON Delay (s)</label>
-                        <input type="number" id="onDelay" value="20" onchange="updateConfig()">
+                        <input type="number" id="onDelay" value="20" onchange="updateConfig(); updateCyclePreview()">
                     </div>
                     <div class="input-group">
                         <label>Publish TX Power (dBm)</label>
@@ -155,10 +159,17 @@
                     <button class="btn-warning" onclick="suspendNow()">Suspend Mesh Now</button>
                     <div class="toggle-container">
                         <label class="switch">
-                            <input type="checkbox" id="autoCycleToggle" onchange="updateConfig()">
+                            <input type="checkbox" id="autoCycleToggle" onchange="updateConfig(); updateCyclePreview()">
                             <span class="slider"></span>
                         </label>
                         <span>Enable Auto Cycle</span>
+                    </div>
+                </div>
+                <div class="cycle-disclaimer" id="cycleDisclaimer">
+                    <span class="cycle-disclaimer-icon">ℹ</span>
+                    <div>
+                        <div>With the current settings, the total cycle period will be <strong id="cyclePreviewVal">—</strong>.</div>
+                        <div class="cycle-disclaimer-note">Note: Shorter cycle intervals may impact node battery life. Changes to timing will not take effect until the next wake cycle.</div>
                     </div>
                 </div>
             </div>

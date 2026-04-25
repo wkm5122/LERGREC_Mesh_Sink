@@ -44,6 +44,17 @@ async function fetchStatus() {
 
         isConnectedState = status.is_connected;
 
+        // Show cycle time on home page
+        if (status.cycle_time != null) {
+            const ctDisplay = document.getElementById('cycleTimeDisplay');
+            const ctValue   = document.getElementById('cycleTimeValue');
+            const secs = status.cycle_time;
+            ctValue.textContent = secs >= 60
+                ? `${(secs / 60).toFixed(1)} min (${secs}s)`
+                : `${secs}s`;
+            ctDisplay.style.display = 'flex';
+        }
+
         // If admin is open and authed, keep connect button in sync
         if (isAdminAuthed) {
             const connectBtn = document.getElementById('connectBtn');
@@ -210,6 +221,8 @@ async function fetchAdminStatus() {
         if (document.activeElement !== wakeDur)    wakeDur.value    = status.wake_dur;
         if (document.activeElement !== onDelay)    onDelay.value    = status.on_delay;
         autoCycle.checked = status.auto_cycle;
+
+        updateCyclePreview();
     } catch (e) {}
 }
 
@@ -329,6 +342,24 @@ function uploadCDB(input) {
             if (data.success) fetchReadings();
         });
     input.value = '';
+}
+
+// ---------------------------------------------------------------------------
+// Cycle Time Preview (Admin)
+// ---------------------------------------------------------------------------
+function updateCyclePreview() {
+    const suspendVal = parseInt(document.getElementById('suspendDur')?.value) || 0;
+    const wakeVal    = parseInt(document.getElementById('wakeDur')?.value)    || 0;
+    const delayVal   = parseInt(document.getElementById('onDelay')?.value)    || 0;
+    const total      = suspendVal + wakeVal + delayVal;
+
+    const previewEl = document.getElementById('cyclePreviewVal');
+    if (!previewEl) return;
+
+    const mins = (total / 60).toFixed(1);
+    previewEl.textContent = total >= 60
+        ? `${mins} minutes (${total}s)`
+        : `${total} seconds`;
 }
 
 // ---------------------------------------------------------------------------

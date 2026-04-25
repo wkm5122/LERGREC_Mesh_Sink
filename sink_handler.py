@@ -10,7 +10,7 @@ from flask import Flask, render_template, request, jsonify, Response, session
 from functools import wraps
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  # For session-based admin auth
+app.secret_key = "LERGREC-SinkHandler-2026-SecretKey"  # Stable key for session persistence
 
 # ---------------------------------------------------------------------------
 # Raspberry Pi Auto-Connect Configuration
@@ -701,11 +701,16 @@ def index():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
+    cycle_time = core.suspend_dur + core.on_delay + core.wake_dur
     return jsonify({
         "is_connected": core.is_connected,
         "port": core.serial_port.port if core.serial_port else None,
         "status_text": core.current_status,
         "status_color": core.current_status_color,
+        "cycle_time": cycle_time,
+        "suspend_dur": core.suspend_dur,
+        "on_delay": core.on_delay,
+        "wake_dur": core.wake_dur,
     })
 
 @app.route('/api/readings', methods=['GET'])
@@ -718,8 +723,8 @@ def export_data():
     """Export pivoted CSV: one row per node, Top (°F) and Bottom (°F) columns."""
     csv_content = core.export_pivoted_csv()
     return Response(
-        csv_content,
-        mimetype="text/csv",
+        csv_content.encode("utf-8"),
+        mimetype="text/csv; charset=utf-8",
         headers={"Content-disposition": "attachment; filename=sensor_data.csv"}
     )
 

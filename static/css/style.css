@@ -480,3 +480,54 @@ input:checked + .slider:before { transform: translateX(20px); background: white;
     header { flex-direction: column; gap: 14px; align-items: flex-start; }
     .overlay-panel { padding: 20px; }
 }
+
+/* Cycle time display — home page status card */
+.cycle-time-display {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 8px 12px;
+    background: rgba(139, 92, 246, 0.1);
+    border: 1px solid rgba(139, 92, 246, 0.25);
+    border-radius: 8px;
+    font-size: 13px;
+}
+.cycle-time-label {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.cycle-time-value {
+    color: var(--primary-color);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Cycle time disclaimer — admin settings card */
+.cycle-disclaimer {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-top: 16px;
+    padding: 12px 14px;
+    background: rgba(234, 179, 8, 0.08);
+    border: 1px solid rgba(234, 179, 8, 0.28);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+.cycle-disclaimer-icon {
+    font-size: 16px;
+    margin-top: 1px;
+    color: #eab308;
+    flex-shrink: 0;
+}
+.cycle-disclaimer strong {
+    color: #eab308;
+}
+.cycle-disclaimer-note {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
