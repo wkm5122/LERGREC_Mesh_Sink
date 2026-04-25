@@ -335,6 +335,7 @@ input:focus, select:focus {
     justify-content: center;
 }
 
+.hidden { display: none !important; }
 .overlay.hidden { display: none; }
 
 .overlay-backdrop {

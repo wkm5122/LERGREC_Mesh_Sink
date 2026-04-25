@@ -723,7 +723,7 @@ def export_data():
     """Export pivoted CSV: one row per node, Top (°F) and Bottom (°F) columns."""
     csv_content = core.export_pivoted_csv()
     return Response(
-        csv_content.encode("utf-8"),
+        b'\xef\xbb\xbf' + csv_content.encode("utf-8"),
         mimetype="text/csv; charset=utf-8",
         headers={"Content-disposition": "attachment; filename=sensor_data.csv"}
     )
