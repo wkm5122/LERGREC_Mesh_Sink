@@ -68,7 +68,7 @@ class SinkHandlerCore:
         self.suspend_dur = 60
         self.wake_dur = 30
         self.on_delay = 20
-        self.auto_cycle_enabled = False
+        self.auto_cycle_enabled = True  # Always enabled — continuous cycling is required
         self.current_status = "Ready"
         self.current_status_color = "blue"
 
@@ -904,18 +904,37 @@ def connect():
 @require_admin
 def config():
     data = request.json
+    MAX_TOTAL_SECS = 12 * 3600  # 12 hours
+
+    # Validate any timing fields being set
+    timing_keys = ('suspend_dur', 'wake_dur', 'on_delay')
+    for key in timing_keys:
+        if key in data:
+            try:
+                val = int(data[key])
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "msg": f"Invalid value for {key}."}), 400
+            if val <= 0:
+                return jsonify({"success": False, "msg": f"{key} must be a positive number greater than 0."}), 400
+
+    # Check projected total cycle time
+    new_suspend = int(data['suspend_dur']) if 'suspend_dur' in data else core.suspend_dur
+    new_wake    = int(data['wake_dur'])    if 'wake_dur'    in data else core.wake_dur
+    new_delay   = int(data['on_delay'])   if 'on_delay'    in data else core.on_delay
+    total = new_suspend + new_wake + new_delay
+    if total > MAX_TOTAL_SECS:
+        hours = total / 3600
+        return jsonify({
+            "success": False,
+            "msg": f"Total cycle time would be {hours:.1f} hours, which exceeds the 12-hour maximum. Please reduce one or more values."
+        }), 400
+
     if 'suspend_dur' in data:
         core.set_duration(data['suspend_dur'])
     if 'wake_dur' in data:
-        try:
-            core.wake_dur = int(data['wake_dur'])
-        except: pass
+        core.wake_dur = int(data['wake_dur'])
     if 'on_delay' in data:
-        try:
-            core.on_delay = int(data['on_delay'])
-        except: pass
-    if 'auto_cycle' in data:
-        core.toggle_auto_cycle(data['auto_cycle'])
+        core.on_delay = int(data['on_delay'])
     if 'tx_power' in data:
         core.set_tx_power(data['tx_power'])
     return jsonify({"success": True})

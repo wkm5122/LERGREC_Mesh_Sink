@@ -249,12 +249,10 @@ async function fetchAdminStatus() {
         const suspendDur = document.getElementById('suspendDur');
         const wakeDur    = document.getElementById('wakeDur');
         const onDelay    = document.getElementById('onDelay');
-        const autoCycle  = document.getElementById('autoCycleToggle');
 
         if (document.activeElement !== suspendDur) suspendDur.value = status.suspend_dur;
         if (document.activeElement !== wakeDur)    wakeDur.value    = status.wake_dur;
         if (document.activeElement !== onDelay)    onDelay.value    = status.on_delay;
-        autoCycle.checked = status.auto_cycle;
 
         updateCyclePreview();
     } catch (e) {}
@@ -287,17 +285,24 @@ async function toggleConnect() {
 }
 
 async function updateConfig() {
+    resetAdminTimeout();
     const payload = {
         suspend_dur: parseInt(document.getElementById('suspendDur').value),
         wake_dur:    parseInt(document.getElementById('wakeDur').value),
         on_delay:    parseInt(document.getElementById('onDelay').value),
-        auto_cycle:  document.getElementById('autoCycleToggle').checked
     };
-    await fetch('/api/config', {
+    const res = await fetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
     });
+    const data = await res.json();
+    if (!data.success) {
+        alert('Invalid setting: ' + data.msg);
+        // Refresh fields back to current valid values
+        await fetchAdminStatus();
+    }
+    updateCyclePreview();
 }
 
 async function setTxPower() {
