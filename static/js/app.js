@@ -6,6 +6,25 @@ let isAdminOpen = false;
 let isAdminAuthed = false;
 let adminLogInterval = null;
 let isConnectedState = false;
+let adminTimeoutTimer = null;
+
+const ADMIN_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
+
+function resetAdminTimeout() {
+    if (!isAdminAuthed) return;
+    clearTimeout(adminTimeoutTimer);
+    adminTimeoutTimer = setTimeout(() => {
+        doLogout();
+        // Show a message in the login card after it appears
+        setTimeout(() => {
+            const err = document.getElementById('loginError');
+            if (err) {
+                err.textContent = 'Session expired after 20 minutes of inactivity.';
+                err.classList.remove('hidden');
+            }
+        }, 50);
+    }, ADMIN_TIMEOUT_MS);
+}
 
 // ---------------------------------------------------------------------------
 // Init
@@ -22,6 +41,14 @@ async function init() {
 
     setInterval(fetchStatus, 3000);
     setInterval(fetchReadings, 5000);
+
+    // Reset admin timeout on any interaction within the admin panel
+    const overlay = document.getElementById('adminOverlay');
+    if (overlay) {
+        ['click', 'keydown', 'input'].forEach(evt =>
+            overlay.addEventListener(evt, () => { if (isAdminAuthed) resetAdminTimeout(); })
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +126,6 @@ function renderNodeCards(nodes) {
         <div class="node-card glass-panel">
             <div class="node-title">
                 <span class="node-label">${escHtml(n.label)}</span>
-                <span class="node-addr">0x${n.addr.toString(16).toUpperCase().padStart(4,'0')}</span>
             </div>
             <div class="reading-row">
                 <div class="reading-item">
@@ -161,10 +187,12 @@ async function showAdminDash() {
     document.getElementById('adminDash').classList.remove('hidden');
     await fetchAdminStatus();
     await fetchPorts();
+    await fetchNodes();
     lastLogIndex = 0;
     if (!adminLogInterval) {
         adminLogInterval = setInterval(fetchLogs, 1000);
     }
+    resetAdminTimeout();
 }
 
 async function doLogin() {
@@ -179,6 +207,7 @@ async function doLogin() {
         const data = await res.json();
         if (data.success) {
             isAdminAuthed = true;
+            resetAdminTimeout();
             await showAdminDash();
         } else {
             document.getElementById('loginError').classList.remove('hidden');
@@ -191,10 +220,15 @@ async function doLogin() {
 async function doLogout() {
     await fetch('/api/admin/logout', {method: 'POST'});
     isAdminAuthed = false;
+    clearTimeout(adminTimeoutTimer);
+    adminTimeoutTimer = null;
     if (adminLogInterval) {
         clearInterval(adminLogInterval);
         adminLogInterval = null;
     }
+    // Reset error message to default before showing login
+    const err = document.getElementById('loginError');
+    if (err) err.textContent = 'Invalid username or password.';
     showAdminLogin();
 }
 
@@ -342,6 +376,78 @@ function uploadCDB(input) {
             if (data.success) fetchReadings();
         });
     input.value = '';
+}
+
+// ---------------------------------------------------------------------------
+// Admin: Node Management
+// ---------------------------------------------------------------------------
+async function fetchNodes() {
+    try {
+        const res = await fetch('/api/admin/nodes');
+        if (!res.ok) return;
+        const nodes = await res.json();
+        renderNodeList(nodes);
+    } catch (e) {}
+}
+
+function renderNodeList(nodes) {
+    const list = document.getElementById('nodeList');
+    if (!list) return;
+    if (nodes.length === 0) {
+        list.innerHTML = '<div class="node-list-empty">No nodes configured. Add one below.</div>';
+        return;
+    }
+    list.innerHTML = nodes.map(n => {
+        const addrHex = '0x' + n.base_addr.toString(16).toUpperCase().padStart(4, '0');
+        return `
+        <div class="node-list-row">
+            <span class="node-list-name">${escHtml(n.node_name)}</span>
+            <span class="node-list-addr">${addrHex}</span>
+            <button class="btn-icon btn-remove-node" title="Remove node"
+                onclick="removeNode('${n.base_addr.toString(16).toUpperCase().padStart(4,'0')}', '${escHtml(n.node_name)}')">✕</button>
+        </div>`;
+    }).join('');
+}
+
+async function addNode() {
+    resetAdminTimeout();
+    const nameEl = document.getElementById('newNodeName');
+    const addrEl = document.getElementById('newNodeAddr');
+    const name = nameEl.value.trim();
+    const addr = addrEl.value.trim();
+
+    if (!name || !addr) {
+        alert('Please enter both a node name and a unicast address.');
+        return;
+    }
+
+    const res = await fetch('/api/admin/nodes', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({base_addr: addr, node_name: name})
+    });
+    const data = await res.json();
+    if (data.success) {
+        nameEl.value = '';
+        addrEl.value = '';
+        await fetchNodes();
+        fetchReadings();
+    } else {
+        alert('Error: ' + data.msg);
+    }
+}
+
+async function removeNode(addrHex, name) {
+    resetAdminTimeout();
+    if (!confirm(`Remove node "${name}" (0x${addrHex})?\n\nThis will not delete any recorded data — only the name mapping.`)) return;
+    const res = await fetch(`/api/admin/nodes/${addrHex}`, {method: 'DELETE'});
+    const data = await res.json();
+    if (data.success) {
+        await fetchNodes();
+        fetchReadings();
+    } else {
+        alert('Error: ' + data.msg);
+    }
 }
 
 // ---------------------------------------------------------------------------

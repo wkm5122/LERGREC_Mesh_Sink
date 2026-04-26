@@ -532,3 +532,93 @@ input:checked + .slider:before { transform: translateX(20px); background: white;
     color: var(--text-muted);
     font-size: 12px;
 }
+
+/* -----------------------------------------------------------------------
+   Node Management Card
+   ----------------------------------------------------------------------- */
+.admin-card-desc {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    margin: -4px 0 12px;
+    line-height: 1.5;
+}
+.admin-card-desc code {
+    font-family: monospace;
+    background: rgba(255,255,255,0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+/* Existing nodes list */
+.node-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+    min-height: 32px;
+}
+.node-list-empty {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 4px 0;
+}
+.node-list-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+}
+.node-list-name {
+    flex: 1;
+    font-weight: 500;
+    font-size: 13.5px;
+    color: var(--text-primary);
+}
+.node-list-addr {
+    font-family: monospace;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    background: rgba(255,255,255,0.07);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+.btn-remove-node {
+    background: none;
+    border: none;
+    color: #ef4444;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    opacity: 0.7;
+    transition: opacity 0.15s, background 0.15s;
+    flex-shrink: 0;
+}
+.btn-remove-node:hover {
+    opacity: 1;
+    background: rgba(239,68,68,0.12);
+}
+
+/* Add node row */
+.node-add-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.node-input-name {
+    flex: 2;
+    min-width: 140px;
+}
+.node-input-addr {
+    flex: 1;
+    min-width: 110px;
+    font-family: monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}

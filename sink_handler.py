@@ -101,6 +101,12 @@ class SinkHandlerCore:
                     name TEXT
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS managed_nodes (
+                    base_addr INTEGER PRIMARY KEY,
+                    node_name TEXT NOT NULL
+                )
+            ''')
             conn.commit()
 
     def _load_settings(self):
@@ -347,7 +353,73 @@ class SinkHandlerCore:
                 used.add(addr)
         return pairs
 
-    def get_latest_readings(self):
+    def _resolve_node_name(self, cursor, top_addr):
+        """
+        Returns the display name for a node whose top-sensor element address is top_addr.
+        Priority:
+          1. managed_nodes table  (base_addr = top_addr - 1, because top element is base+1)
+          2. managed_nodes table  (base_addr = top_addr, for single-element nodes)
+          3. node_elements table  (CDB-imported name)
+          4. Fallback hex string
+        """
+        # The sensor node's base unicast is one below the top element (000E -> 000F top)
+        for candidate_base in (top_addr - 1, top_addr):
+            cursor.execute(
+                "SELECT node_name FROM managed_nodes WHERE base_addr = ?", (candidate_base,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+        # CDB fallback
+        cursor.execute(
+            "SELECT name FROM node_elements WHERE unicast_addr = ?", (top_addr,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        return f"Node 0x{top_addr:04X}"
+
+    # ------------------------------------------------------------------
+    # Managed Nodes CRUD
+    # ------------------------------------------------------------------
+    def get_managed_nodes(self):
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT base_addr, node_name FROM managed_nodes ORDER BY base_addr")
+            return [{"base_addr": r[0], "node_name": r[1]} for r in cursor.fetchall()]
+
+    def add_managed_node(self, base_addr_hex, node_name):
+        """Add or update a managed node. base_addr_hex is a hex string like '000E'."""
+        try:
+            base_addr = int(base_addr_hex.strip(), 16)
+        except ValueError:
+            return False, "Invalid hex address."
+        if not node_name.strip():
+            return False, "Node name cannot be empty."
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO managed_nodes (base_addr, node_name) VALUES (?, ?) "
+                "ON CONFLICT(base_addr) DO UPDATE SET node_name = excluded.node_name",
+                (base_addr, node_name.strip())
+            )
+            conn.commit()
+        self.log(f"Managed node added/updated: 0x{base_addr:04X} = '{node_name.strip()}'")
+        return True, "Node saved."
+
+    def remove_managed_node(self, base_addr_hex):
+        try:
+            base_addr = int(base_addr_hex.strip(), 16)
+        except ValueError:
+            return False, "Invalid hex address."
+        with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM managed_nodes WHERE base_addr = ?", (base_addr,))
+            conn.commit()
+        self.log(f"Managed node removed: 0x{base_addr:04X}")
+        return True, "Node removed."
+
+
         """
         Returns the most recent top and bottom readings for each physical node,
         with temperatures converted to Fahrenheit.
@@ -367,12 +439,8 @@ class SinkHandlerCore:
             nodes = []
 
             for top_addr, bot_addr in pairs:
-                # Node label — prefer node_elements name for top addr
-                cursor.execute(
-                    "SELECT name FROM node_elements WHERE unicast_addr = ?", (top_addr,)
-                )
-                ne_row = cursor.fetchone()
-                node_label = ne_row[0] if ne_row else f"Node 0x{top_addr:04X}"
+                # Node label — managed_nodes > CDB > fallback
+                node_label = self._resolve_node_name(cursor, top_addr)
 
                 # Latest top reading — search top_addr for any 'top' name,
                 # fall back to most recent reading on that addr
@@ -476,13 +544,17 @@ class SinkHandlerCore:
             output_rows = []
 
             for top_addr, bot_addr in pairs:
-                # Node label
-                cursor.execute(
-                    "SELECT name FROM node_elements WHERE unicast_addr = ?", (top_addr,)
-                )
-                ne_row = cursor.fetchone()
-                node_label = ne_row[0] if ne_row else f"Node 0x{top_addr:04X}"
-                node_addr_str = f"0x{top_addr:04X}"
+                # Node label — managed_nodes > CDB > fallback
+                node_label = self._resolve_node_name(cursor, top_addr)
+                # For the CSV Node Address column, use the node's base unicast addr
+                # (i.e. top_addr - 1 if a managed entry exists at base, else top_addr)
+                base_for_csv = top_addr
+                with sqlite3.connect(self.db_file, check_same_thread=False) as _c2:
+                    _cur2 = _c2.cursor()
+                    _cur2.execute("SELECT base_addr FROM managed_nodes WHERE base_addr = ?", (top_addr - 1,))
+                    if _cur2.fetchone():
+                        base_for_csv = top_addr - 1
+                node_addr_str = f"0x{base_for_csv:04X}"
 
                 # Fetch all top readings chronologically
                 cursor.execute(
@@ -863,11 +935,57 @@ def clear_logs():
     core.logs = []
     return jsonify({"success": True})
 
+# ---------------------------------------------------------------------------
+# Flask Routes — Managed Nodes
+# ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+@app.route('/api/admin/nodes', methods=['GET'])
+@require_admin
+def get_nodes():
+    return jsonify(core.get_managed_nodes())
+
+@app.route('/api/admin/nodes', methods=['POST'])
+@require_admin
+def add_node():
+    data = request.json or {}
+    base_addr_hex = data.get('base_addr', '').strip()
+    node_name     = data.get('node_name', '').strip()
+    success, msg  = core.add_managed_node(base_addr_hex, node_name)
+    return jsonify({"success": success, "msg": msg}), (200 if success else 400)
+
+@app.route('/api/admin/nodes/<base_addr_hex>', methods=['DELETE'])
+@require_admin
+def remove_node(base_addr_hex):
+    success, msg = core.remove_managed_node(base_addr_hex)
+    return jsonify({"success": success, "msg": msg}), (200 if success else 400)
+
+# ---------------------------------------------------------------------------
+# Background: midnight log-clear
+# ---------------------------------------------------------------------------
+
+def _midnight_log_clear():
+    """Clears the in-memory log buffer once per day at midnight."""
+    import time as _time
+    while True:
+        now = datetime.now()
+        # Seconds until next midnight
+        seconds_until_midnight = (
+            (23 - now.hour) * 3600 +
+            (59 - now.minute) * 60 +
+            (59 - now.second) + 1
+        )
+        _time.sleep(seconds_until_midnight)
+        core.logs = []
+        core.log("System: In-memory log cleared by daily maintenance.")
+
+
     os.makedirs('templates', exist_ok=True)
     os.makedirs('static/css', exist_ok=True)
     os.makedirs('static/js', exist_ok=True)
+
+    # Daily midnight log clear
+    midnight_thread = threading.Thread(target=_midnight_log_clear, daemon=True)
+    midnight_thread.start()
 
     if PI_AUTO_CONNECT:
         ac_thread = threading.Thread(
