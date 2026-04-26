@@ -979,6 +979,7 @@ def _midnight_log_clear():
         core.log("System: In-memory log cleared by daily maintenance.")
 
 
+if __name__ == "__main__":
     os.makedirs('templates', exist_ok=True)
     os.makedirs('static/css', exist_ok=True)
     os.makedirs('static/js', exist_ok=True)
