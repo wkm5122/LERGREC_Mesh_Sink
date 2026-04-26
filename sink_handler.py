@@ -419,11 +419,11 @@ class SinkHandlerCore:
         self.log(f"Managed node removed: 0x{base_addr:04X}")
         return True, "Node removed."
 
-
+    def get_latest_readings(self):
         """
-        Returns the most recent top and bottom readings for each physical node,
-        with temperatures converted to Fahrenheit.
-        Each node is identified by a consecutive address pair (top_addr, bot_addr).
+        Returns the most recent top and bottom readings for each physical node.
+        Always includes every entry in managed_nodes, even if no data has arrived yet.
+        Also includes any unmanaged nodes that have data in sensor_data.
         """
         def fmt_f(val):
             if val is None:
@@ -432,18 +432,62 @@ class SinkHandlerCore:
 
         with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT addr FROM sensor_data ORDER BY addr")
-            addrs = [row[0] for row in cursor.fetchall()]
 
-            pairs = self._group_addrs_into_nodes(addrs)
+            # --- Build the full set of (top_addr, bot_addr) pairs to show ---
+
+            # 1. Managed nodes: base_addr is the node unicast; top element = base+1, bot = base+2
+            cursor.execute("SELECT base_addr FROM managed_nodes ORDER BY base_addr")
+            managed_bases = [row[0] for row in cursor.fetchall()]
+            # top element addr = base+1, bottom = base+2 (per JSON: 000E base -> 000F top, 0010 bot)
+            managed_pairs = {(b + 1, b + 2): b for b in managed_bases}
+
+            # 2. Unmanaged nodes from sensor_data (exclude addrs already covered by managed pairs)
+            cursor.execute("SELECT DISTINCT addr FROM sensor_data ORDER BY addr")
+            all_data_addrs = set(row[0] for row in cursor.fetchall())
+            managed_element_addrs = set()
+            for (ta, ba) in managed_pairs:
+                managed_element_addrs.add(ta)
+                managed_element_addrs.add(ba)
+            unmanaged_addrs = sorted(all_data_addrs - managed_element_addrs)
+            unmanaged_pairs = self._group_addrs_into_nodes(unmanaged_addrs)
+
             nodes = []
 
-            for top_addr, bot_addr in pairs:
-                # Node label — managed_nodes > CDB > fallback
+            # --- Managed nodes first (always shown) ---
+            for (top_addr, bot_addr), base_addr in sorted(managed_pairs.items()):
+                cursor.execute(
+                    "SELECT node_name FROM managed_nodes WHERE base_addr = ?", (base_addr,)
+                )
+                row = cursor.fetchone()
+                node_label = row[0] if row else f"Node 0x{base_addr:04X}"
+
+                cursor.execute(
+                    """SELECT value, timestamp FROM sensor_data
+                       WHERE addr = ? ORDER BY id DESC LIMIT 1""",
+                    (top_addr,)
+                )
+                top_row = cursor.fetchone()
+
+                cursor.execute(
+                    """SELECT value, timestamp FROM sensor_data
+                       WHERE addr = ? ORDER BY id DESC LIMIT 1""",
+                    (bot_addr,)
+                )
+                bot_row = cursor.fetchone()
+
+                nodes.append({
+                    "addr": base_addr,
+                    "label": node_label,
+                    "top_f":  fmt_f(top_row[0]) if top_row else None,
+                    "top_ts": top_row[1][:19].replace("T", " ") if top_row else None,
+                    "bot_f":  fmt_f(bot_row[0]) if bot_row else None,
+                    "bot_ts": bot_row[1][:19].replace("T", " ") if bot_row else None,
+                })
+
+            # --- Unmanaged nodes (only shown if they have data) ---
+            for top_addr, bot_addr in unmanaged_pairs:
                 node_label = self._resolve_node_name(cursor, top_addr)
 
-                # Latest top reading — search top_addr for any 'top' name,
-                # fall back to most recent reading on that addr
                 cursor.execute(
                     """SELECT value, timestamp FROM sensor_data
                        WHERE addr = ? AND name LIKE '%top%'
@@ -459,8 +503,6 @@ class SinkHandlerCore:
                     )
                     top_row = cursor.fetchone()
 
-                # Latest bottom reading — search bot_addr for any 'bot' name,
-                # fall back to most recent reading on that addr
                 bot_row = None
                 if bot_addr is not None:
                     cursor.execute(
@@ -479,14 +521,16 @@ class SinkHandlerCore:
                         bot_row = cursor.fetchone()
 
                 nodes.append({
-                    "addr": top_addr,
-                    "label": node_label,
-                    "top_f": fmt_f(top_row[0]) if top_row else None,
+                    "addr":   top_addr,
+                    "label":  node_label,
+                    "top_f":  fmt_f(top_row[0]) if top_row else None,
                     "top_ts": top_row[1][:19].replace("T", " ") if top_row else None,
-                    "bot_f": fmt_f(bot_row[0]) if bot_row else None,
+                    "bot_f":  fmt_f(bot_row[0]) if bot_row else None,
                     "bot_ts": bot_row[1][:19].replace("T", " ") if bot_row else None,
                 })
+
             return nodes
+
 
     def query_data(self, addr=None):
         with sqlite3.connect(self.db_file, check_same_thread=False) as conn:
