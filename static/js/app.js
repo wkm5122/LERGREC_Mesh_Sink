@@ -246,11 +246,11 @@ async function fetchAdminStatus() {
         connectBtn.textContent = isConnectedState ? 'Disconnect' : 'Connect';
         connectBtn.className = isConnectedState ? 'btn-danger' : 'btn-primary';
 
-        const suspendDur = document.getElementById('suspendDur');
+        const intervalMin = document.getElementById('intervalMin');
         const wakeDur    = document.getElementById('wakeDur');
         const onDelay    = document.getElementById('onDelay');
 
-        if (document.activeElement !== suspendDur) suspendDur.value = status.suspend_dur;
+        if (document.activeElement !== intervalMin) intervalMin.value = status.interval_minutes;
         if (document.activeElement !== wakeDur)    wakeDur.value    = status.wake_dur;
         if (document.activeElement !== onDelay)    onDelay.value    = status.on_delay;
 
@@ -287,9 +287,9 @@ async function toggleConnect() {
 async function updateConfig() {
     resetAdminTimeout();
     const payload = {
-        suspend_dur: parseInt(document.getElementById('suspendDur').value),
-        wake_dur:    parseInt(document.getElementById('wakeDur').value),
-        on_delay:    parseInt(document.getElementById('onDelay').value),
+        interval_minutes: parseFloat(document.getElementById('intervalMin').value),
+        wake_dur:         parseInt(document.getElementById('wakeDur').value),
+        on_delay:         parseInt(document.getElementById('onDelay').value),
     };
     const res = await fetch('/api/config', {
         method: 'POST',
@@ -459,18 +459,7 @@ async function removeNode(addrHex, name) {
 // Cycle Time Preview (Admin)
 // ---------------------------------------------------------------------------
 function updateCyclePreview() {
-    const suspendVal = parseInt(document.getElementById('suspendDur')?.value) || 0;
-    const wakeVal    = parseInt(document.getElementById('wakeDur')?.value)    || 0;
-    const delayVal   = parseInt(document.getElementById('onDelay')?.value)    || 0;
-    const total      = suspendVal + wakeVal + delayVal;
-
-    const previewEl = document.getElementById('cyclePreviewVal');
-    if (!previewEl) return;
-
-    const mins = (total / 60).toFixed(1);
-    previewEl.textContent = total >= 60
-        ? `${mins} minutes (${total}s)`
-        : `${total} seconds`;
+    // Interval is user-defined; no calculated preview needed.
 }
 
 // ---------------------------------------------------------------------------

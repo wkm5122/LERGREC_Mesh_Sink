@@ -120,9 +120,9 @@
                 <h3>Mesh Cycle Settings</h3>
                 <div class="form-grid two-col">
                     <div class="input-group">
-                        <label>Suspend Duration (s)</label>
+                        <label>Capture Interval (min)</label>
                         <div class="flex-row">
-                            <input type="number" id="suspendDur" value="60">
+                            <input type="number" id="intervalMin" value="15" min="1" step="0.5">
                             <button class="btn-secondary" onclick="updateConfig(); updateCyclePreview()">Set</button>
                         </div>
                     </div>
@@ -161,8 +161,7 @@
                 <div class="cycle-disclaimer" id="cycleDisclaimer">
                     <span class="cycle-disclaimer-icon">ℹ</span>
                     <div>
-                        <div>With the current settings, the total cycle period will be <strong id="cyclePreviewVal">—</strong>.</div>
-                        <div class="cycle-disclaimer-note">Note: Shorter cycle intervals may impact node battery life. Changes to timing will not take effect until the next wake cycle.</div>
+                        <div class="cycle-disclaimer-note">Note: Shorter capture intervals may impact node battery life. Changes to timing will not take effect until the next wake cycle.</div>
                     </div>
                 </div>
             </div>

@@ -65,7 +65,7 @@ class SinkHandlerCore:
         self.settings_file = "settings.json"
         
         # State
-        self.suspend_dur = 60
+        self.interval_minutes = 15  # User-facing capture interval in minutes
         self.wake_dur = 30
         self.on_delay = 20
         self.auto_cycle_enabled = True  # Always enabled — continuous cycling is required
@@ -136,6 +136,11 @@ class SinkHandlerCore:
         except Exception as e:
             self.log(f"Error saving settings: {e}")
 
+    @property
+    def suspend_dur(self):
+        """Suspend duration in seconds, derived from the user-set capture interval."""
+        return max(1, self.interval_minutes * 60 - self.wake_dur - self.on_delay)
+
     def log(self, message):
         timestamp = datetime.now().strftime('%H:%M:%S')
         entry = f"{timestamp} - {message}"
@@ -205,7 +210,6 @@ class SinkHandlerCore:
     def set_duration(self, dur):
         try:
             dur = int(dur)
-            self.suspend_dur = dur
             self.send_command(f"mesh_app set_level {dur}")
             self.last_sent_duration = dur
             return True
@@ -817,13 +821,14 @@ def index():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    cycle_time = core.suspend_dur + core.on_delay + core.wake_dur
+    cycle_secs = core.interval_minutes * 60
     return jsonify({
         "is_connected": core.is_connected,
         "port": core.serial_port.port if core.serial_port else None,
         "status_text": core.current_status,
         "status_color": core.current_status_color,
-        "cycle_time": cycle_time,
+        "cycle_time": cycle_secs,
+        "interval_minutes": core.interval_minutes,
         "suspend_dur": core.suspend_dur,
         "on_delay": core.on_delay,
         "wake_dur": core.wake_dur,
@@ -879,6 +884,7 @@ def admin_get_status():
         "status_text": core.current_status,
         "status_color": core.current_status_color,
         "auto_cycle": core.auto_cycle_enabled,
+        "interval_minutes": core.interval_minutes,
         "suspend_dur": core.suspend_dur,
         "wake_dur": core.wake_dur,
         "on_delay": core.on_delay
@@ -906,35 +912,43 @@ def config():
     data = request.json
     MAX_TOTAL_SECS = 12 * 3600  # 12 hours
 
-    # Validate any timing fields being set
-    timing_keys = ('suspend_dur', 'wake_dur', 'on_delay')
+    # Validate timing fields
+    timing_keys = ('interval_minutes', 'wake_dur', 'on_delay')
     for key in timing_keys:
         if key in data:
             try:
-                val = int(data[key])
+                val = float(data[key]) if key == 'interval_minutes' else int(data[key])
             except (TypeError, ValueError):
                 return jsonify({"success": False, "msg": f"Invalid value for {key}."}), 400
             if val <= 0:
                 return jsonify({"success": False, "msg": f"{key} must be a positive number greater than 0."}), 400
 
-    # Check projected total cycle time
-    new_suspend = int(data['suspend_dur']) if 'suspend_dur' in data else core.suspend_dur
-    new_wake    = int(data['wake_dur'])    if 'wake_dur'    in data else core.wake_dur
-    new_delay   = int(data['on_delay'])   if 'on_delay'    in data else core.on_delay
-    total = new_suspend + new_wake + new_delay
+    new_interval = float(data['interval_minutes']) if 'interval_minutes' in data else core.interval_minutes
+    new_wake     = int(data['wake_dur'])            if 'wake_dur'    in data else core.wake_dur
+    new_delay    = int(data['on_delay'])            if 'on_delay'    in data else core.on_delay
+
+    total = new_interval * 60
     if total > MAX_TOTAL_SECS:
         hours = total / 3600
         return jsonify({
             "success": False,
-            "msg": f"Total cycle time would be {hours:.1f} hours, which exceeds the 12-hour maximum. Please reduce one or more values."
+            "msg": f"Capture interval of {hours:.1f} hours exceeds the 12-hour maximum."
         }), 400
 
-    if 'suspend_dur' in data:
-        core.set_duration(data['suspend_dur'])
+    # Ensure suspend would be at least 1 second
+    computed_suspend = new_interval * 60 - new_wake - new_delay
+    if computed_suspend < 1:
+        return jsonify({
+            "success": False,
+            "msg": f"Wake duration ({new_wake}s) + firmware delay ({new_delay}s) exceeds the capture interval ({new_interval} min). Please increase the interval or reduce wake/delay."
+        }), 400
+
+    if 'interval_minutes' in data:
+        core.interval_minutes = new_interval
     if 'wake_dur' in data:
-        core.wake_dur = int(data['wake_dur'])
+        core.wake_dur = new_wake
     if 'on_delay' in data:
-        core.on_delay = int(data['on_delay'])
+        core.on_delay = new_delay
     if 'tx_power' in data:
         core.set_tx_power(data['tx_power'])
     return jsonify({"success": True})
